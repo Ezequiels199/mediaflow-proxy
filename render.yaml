@@ -2,8 +2,11 @@ services:
   - type: web
     name: mediaflow-proxy
     env: docker
-    plan: free
     dockerfilePath: ./Dockerfile
     envVars:
       - key: PORT
-        value: 3000
+        value: 8080
+      - key: API_KEY
+        value: miclave
+      - key: SUPERCLAVE
+        value: mipassword
