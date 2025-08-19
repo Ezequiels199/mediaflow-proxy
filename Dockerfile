@@ -1,8 +1,10 @@
-# Usa la imagen ya lista del proxy
 FROM mhdzumair/mediaflow-proxy:latest
 
-# Render asigna la variable PORT
-ENV PORT=3000
+# Definimos el puerto que Render debe usar
+ENV PORT=8080
 
-# Expone el puerto
-EXPOSE 3000
+# Exponemos el puerto 8080
+EXPOSE 8080
+
+# Comando de inicio
+CMD ["npm", "start"]
