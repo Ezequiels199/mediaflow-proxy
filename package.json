@@ -1,14 +1,17 @@
 {
-  "name": "mediafusion-proxy",
+  "name": "mediaflow-proxy",
   "version": "1.0.0",
-  "description": "Servidor proxy para MediaFusion en Stremio",
+  "description": "Proxy robusto para Stremio / MediaFusion",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "axios": "^1.6.7",
+    "axios-cookiejar-support": "^4.0.4",
+    "express": "^4.18.2",
+    "lru-cache": "^10.2.0",
+    "tough-cookie": "^4.1.3"
   }
 }
