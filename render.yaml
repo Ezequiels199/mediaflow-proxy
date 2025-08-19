@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: mediaflow-proxy
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: API_KEY
+        value: miclave
