@@ -2,10 +2,10 @@
   "name": "mediaflow-proxy",
   "version": "2.0.0",
   "description": "Proxy avanzado para Stremio (Mixdrop, Streamtape, Doodstream, archivos grandes).",
-  "main": "src/index.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "compression": "^1.7.4",
