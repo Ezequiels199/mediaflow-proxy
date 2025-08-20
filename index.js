@@ -1,4 +1,4 @@
-import express from "express";
+const express = require("express");
 import fetch from "node-fetch";
 import compression from "compression";
 import NodeCache from "node-cache";
