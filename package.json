@@ -1,36 +1,40 @@
 {
   "name": "mediaflow-proxy",
-  "version": "3.2.0",
-  "description": "Servidor proxy avanzado y robusto para streaming, manejo de archivos grandes, URLs externas y seguridad con Express.",
-  "main": "index.js",
+  "version": "3.3.0",
+  "private": true,
+  "description": "Proxy/stream server robusto para archivos grandes, URLs externas, cookies y cache.",
   "type": "module",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.8",
-    "node-fetch": "^3.3.2",
-    "cors": "^2.8.5",
-    "morgan": "^1.10.0",
-    "compression": "^1.7.4",
-    "helmet": "^7.0.0",
-    "lru-cache": "^10.2.0",
-    "http-proxy-middleware": "^3.0.0",
-    "cookie-parser": "^1.4.6"
+    "start": "node src/index.js",
+    "render-build": "echo \"no build step\"",
+    "prestart": "node -v && npm ls --depth=0 || true"
   },
   "engines": {
     "node": "18.x"
   },
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.7",
+    "axios-cookiejar-support": "^5.0.2",
+    "tough-cookie": "^4.1.3",
+    "node-fetch": "^3.3.2",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0",
+    "compression": "^1.7.4",
+    "helmet": "^7.1.0",
+    "lru-cache": "^10.2.2",
+    "http-proxy-middleware": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.5"
+  },
   "keywords": [
     "proxy",
-    "media",
     "streaming",
-    "server",
-    "security",
     "express",
-    "robust"
+    "cookies",
+    "cache",
+    "helmet"
   ],
-  "author": "TuNombre",
   "license": "MIT"
 }
