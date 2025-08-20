@@ -1,40 +1,26 @@
 {
-  "name": "mediaflow-proxy",
-  "version": "3.3.0",
-  "private": true,
-  "description": "Proxy/stream server robusto para archivos grandes, URLs externas, cookies y cache.",
-  "type": "module",
-  "main": "src/index.js",
+  "name": "mediaflow-pro",
+  "version": "1.0.0",
+  "description": "Servidor Node.js robusto para manejar streams grandes, URLs externas y soporte de cookies.",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "render-build": "echo \"no build step\"",
-    "prestart": "node -v && npm ls --depth=0 || true"
-  },
-  "engines": {
-    "node": "18.x"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "axios": "^1.7.7",
-    "axios-cookiejar-support": "^5.0.2",
-    "tough-cookie": "^4.1.3",
-    "node-fetch": "^3.3.2",
-    "cors": "^2.8.5",
-    "morgan": "^1.10.0",
-    "compression": "^1.7.4",
-    "helmet": "^7.1.0",
-    "lru-cache": "^10.2.2",
-    "http-proxy-middleware": "^3.0.3",
-    "cookie-parser": "^1.4.7",
-    "dotenv": "^16.4.5"
+    "axios": "^1.6.7",
+    "axios-cookiejar-support": "^6.0.0",
+    "tough-cookie": "^4.1.3"
+  },
+  "engines": {
+    "node": ">=18.x"
   },
   "keywords": [
-    "proxy",
     "streaming",
-    "express",
     "cookies",
-    "cache",
-    "helmet"
+    "proxy",
+    "media",
+    "nodejs"
   ],
+  "author": "Ezequiels199",
   "license": "MIT"
 }
