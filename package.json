@@ -1,16 +1,18 @@
 {
   "name": "mediaflow-proxy-legal",
   "version": "1.0.0",
-  "description": "Proxy legal para Stremio con resolvers legales 😉",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "compression": "^1.7.4",
     "express": "^4.18.2",
-    "node-cache": "^5.1.2",
-    "node-fetch": "^3.3.2"
+    "mime-types": "^2.1.35",
+    "node-cache": "^5.1.2"
   }
 }
