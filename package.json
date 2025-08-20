@@ -1,33 +1,16 @@
 {
-  "name": "mediaflow-proxy",
-  "version": "2.0.0",
-  "description": "Proxy avanzado con caché RAM+Disco, compresión, autenticación y resolvers LEGAL GUIÑO 😉",
+  "name": "mediaflow-legal",
+  "version": "1.0.0",
+  "description": "Proxy LEGAL super pro con cache en RAM y disco",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
-  "keywords": [
-    "proxy",
-    "stremio",
-    "video",
-    "cache",
-    "resolver",
-    "media"
-  ],
-  "author": "TuNombre",
-  "license": "MIT",
   "dependencies": {
     "compression": "^1.7.4",
-    "express": "^4.19.2",
+    "express": "^4.18.2",
     "node-cache": "^5.1.2",
     "node-fetch": "^3.3.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
