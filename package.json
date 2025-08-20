@@ -1,22 +1,21 @@
 {
   "name": "mediaflow-proxy",
-  "version": "1.0.0",
-  "description": "Proxy optimizado para streaming de archivos grandes en Stremio",
+  "version": "1.0.1",
+  "description": "MediaFlow proxy pro - cache mixto y streaming optimizado",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "http-proxy-middleware": "^2.0.6",
-    "morgan": "^1.10.0",
-    "helmet": "^7.0.0",
-    "compression": "^1.7.4",
-    "node-cache": "^5.1.2"
   },
   "engines": {
     "node": ">=18"
   },
-  "author": "TuNombre",
-  "license": "MIT"
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "node-cache": "^5.1.2",
+    "morgan": "^1.10.0",
+    "helmet": "^7.0.0",
+    "compression": "^1.7.4"
+  }
 }
