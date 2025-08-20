@@ -1,13 +1,5 @@
-/**
- * index.js
- * Proxy de streaming + cache (Node 18+)
- *
- * Reemplaza tu index.js con este. Configurar env var:
- *   API_PASSWORD=superclave123
- *
- * Nota: algunos hosts (Akamai, Mixdrop, Streamtape...) pueden seguir bloqueando
- * ciertos recursos aunque se envíen headers "tipo navegador". Eso depende del CDN.
- */
+// index.js - MediaFlow Proxy mejorado (Node 18+)
+// Recomendación: setear API_PASSWORD en env: API_PASSWORD=superclave123
 
 const express = require("express");
 const compression = require("compression");
@@ -15,47 +7,38 @@ const NodeCache = require("node-cache");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { pipeline } = require("stream");
+const { pipeline, Readable, PassThrough } = require("stream");
 const { promisify } = require("util");
 const streamPipeline = promisify(pipeline);
-const { PassThrough } = require("stream");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Contraseña (preferible definir en ENV)
 const API_PASSWORD = process.env.API_PASSWORD || "superclave123";
 
-// Caché en RAM para objetos pequeños (6 horas)
+// Caché RAM (6 horas)
 const memoryCache = new NodeCache({ stdTTL: 6 * 60 * 60, checkperiod: 120 });
 
-// Carpeta disco
+// Disco
 const CACHE_DIR = path.join(process.cwd(), "disk_cache");
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-// Límite disco (en bytes) — ajustar según tu plan (20GB por defecto)
+// Límite disco (20GB por defecto)
 const DISK_CACHE_LIMIT = parseInt(process.env.DISK_CACHE_LIMIT || String(20 * 1024 * 1024 * 1024), 10);
+const MAX_RAM_CACHE_BYTES = parseInt(process.env.MAX_RAM_CACHE_BYTES || String(10 * 1024 * 1024), 10); // 10MB
 
-// Tamaño máximo para almacenar en RAM (ej: 10 MB)
-const MAX_RAM_CACHE_BYTES = 10 * 1024 * 1024;
-
-// Headers "tipo navegador" por defecto (reduce bloqueos)
 function defaultBrowserHeaders(referer) {
   return {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
     Accept: "*/*",
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
     Referer: referer || undefined,
   };
 }
 
-// Util: hash para nombre de archivo
 function hashName(input) {
   return crypto.createHash("md5").update(input).digest("hex");
 }
 
-// Obtener uso disco
 function getDiskUsage() {
   const files = fs.readdirSync(CACHE_DIR);
   let total = 0;
@@ -68,32 +51,30 @@ function getDiskUsage() {
   return { total, list };
 }
 
-// Limpiar disco por LRU si supera límite
 function enforceDiskLimit() {
   try {
     const { total, list } = getDiskUsage();
     if (total <= DISK_CACHE_LIMIT) return;
-    console.log("⚠️ Disk cache exceeded. Cleaning oldest files...");
+    console.log("⚠️ Disk cache excedida. Limpiando...");
     list.sort((a, b) => a.mtime - b.mtime);
-    let current = total;
+    let cur = total;
     for (const item of list) {
       try {
         fs.unlinkSync(item.path);
-        current -= item.size;
-        if (current <= DISK_CACHE_LIMIT) break;
+        cur -= item.size;
+        if (cur <= DISK_CACHE_LIMIT) break;
       } catch (e) {
-        console.warn("No se pudo borrar archivo de cache:", item.path, e.message);
+        console.warn("No se pudo borrar:", item.path, e.message);
       }
     }
   } catch (e) {
-    console.error("Error en enforceDiskLimit:", e);
+    console.error("Error enforceDiskLimit:", e.message || e);
   }
 }
 
-// Middleware: compresión y body parsers si necesitás
 app.use(compression());
 
-// Middleware: autenticación (para /proxy)
+// Auth middleware para /proxy
 app.use("/proxy", (req, res, next) => {
   const pass =
     req.query.password ||
@@ -102,7 +83,7 @@ app.use("/proxy", (req, res, next) => {
     (req.headers.authorization ? req.headers.authorization.replace(/^Bearer\s+/i, "") : undefined);
 
   if (!API_PASSWORD) {
-    console.warn("⚠️ API_PASSWORD no está seteada en env. Usando fallback (no seguro).");
+    console.warn("⚠️ API_PASSWORD no seteada en env. Usando fallback (no seguro).");
   }
 
   if (pass !== API_PASSWORD) {
@@ -111,175 +92,162 @@ app.use("/proxy", (req, res, next) => {
   next();
 });
 
-// Ruta: /proxy/<URL_ENCODEADA_O_DIRECTA>
+// Ruta proxy
 app.get("/proxy/*", async (req, res) => {
   try {
-    // target puede venir como /proxy/https://dominio/... (req.params[0])
     let target = req.params[0] || req.query.url;
-    if (!target) {
-      return res.status(400).json({ error: "Falta URL objetivo" });
-    }
+    if (!target) return res.status(400).json({ error: "Falta URL objetivo" });
 
-    // A veces el navegador envía el path con espacios codificados; decodificamos
-    try {
-      target = decodeURIComponent(target);
-    } catch (e) {
-      // ignore
-    }
+    try { target = decodeURIComponent(target); } catch (e) {}
 
-    // comprobar esquema
     if (!/^https?:\/\//i.test(target)) {
       return res.status(400).json({ error: "La URL objetivo debe empezar por http:// o https://" });
     }
 
-    // nombre de cache
     const name = hashName(target) + ".cache";
     const filePath = path.join(CACHE_DIR, name);
 
-    // Forward Range if present
     const rangeHeader = req.headers.range;
 
-    // Primero: intentar RAM cache para respuestas pequeñas
-    const ramCached = memoryCache.get(target);
-    if (ramCached && !rangeHeader) {
-      console.log("Sirviendo desde RAM:", target);
-      // enviar headers guardados (sin campos problemáticos)
-      for (const [k, v] of Object.entries(ramCached.headers || {})) {
+    // 1) RAM cache (sin Range)
+    const ram = memoryCache.get(target);
+    if (ram && !rangeHeader) {
+      console.log("Sirviendo RAM:", target);
+      for (const [k, v] of Object.entries(ram.headers || {})) {
         if (k.toLowerCase() === "transfer-encoding") continue;
         res.setHeader(k, v);
       }
-      res.status(200).send(ramCached.body);
-      return;
+      return res.status(200).send(ram.body);
     }
 
-    // Segundo: si existe archivo en disco y NO hay Range -> usarlo
+    // 2) Disco cache (sin Range)
     if (fs.existsSync(filePath) && !rangeHeader) {
-      console.log("Sirviendo desde DISCO:", target);
+      console.log("Sirviendo DISCO:", target);
       const stat = fs.statSync(filePath);
       res.setHeader("Content-Length", stat.size);
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Access-Control-Allow-Origin", "*");
       const read = fs.createReadStream(filePath);
       return streamPipeline(read, res).catch((err) => {
-        console.error("Error al enviar desde disco:", err);
-        if (!res.headersSent) res.status(500).json({ error: "Error al leer cache disco" });
+        console.error("Error enviando desde disco:", err.message || err);
+        if (!res.headersSent) res.status(500).json({ error: "Error leyendo cache disco" });
       });
     }
 
-    // Si llegamos acá: hacemos fetch al origen con headers de navegador
-    console.log("Descargando desde origen:", target, rangeHeader ? "(Range)" : "");
+    // 3) Fetch upstream
+    console.log("Fetching:", target, rangeHeader ? "(Range)" : "");
     const upstreamHeaders = {
       ...defaultBrowserHeaders(req.get("referer") || target),
       ...(rangeHeader ? { Range: rangeHeader } : {}),
-      // Pasamos algunos headers del cliente si son relevantes
-      "Accept": req.headers.accept || "*/*",
+      Accept: req.headers.accept || "*/*",
     };
 
-    // Usar global fetch (Node 18+). Si no está, esto fallará.
     if (typeof fetch !== "function") {
-      throw new Error("fetch no disponible en este runtime. Usar Node 18+ o instalar node-fetch.");
+      throw new Error("fetch no disponible. Usar Node 18+");
     }
 
     const upstreamResp = await fetch(target, {
       method: "GET",
       headers: upstreamHeaders,
-      // timeout no nativo: se puede manejar vía AbortController si se quiere
     });
 
-    // Si origen responde con error (401/403/4xx/5xx) devolvemos información
     if (!upstreamResp.ok) {
-      const bodyText = await upstreamResp.text().catch(() => "");
-      console.warn("Upstream responded with status", upstreamResp.status);
-      return res.status(upstreamResp.status).json({
-        error: `Error al obtener el origen`,
-        status: upstreamResp.status,
-        body: bodyText,
-      });
+      const text = await upstreamResp.text().catch(() => "");
+      console.warn("Upstream status:", upstreamResp.status);
+      return res.status(upstreamResp.status).json({ error: "Error al obtener origen", status: upstreamResp.status, body: text });
     }
 
-    // Reenviamos headers importantes al cliente
+    // Reenviar headers salvo los peligrosos
     upstreamResp.headers.forEach((value, key) => {
-      // proteger de headers que rompen el envío
-      if (key.toLowerCase() === "content-encoding") return; // let compression middleware decidir
-      if (key.toLowerCase() === "transfer-encoding") return;
+      const k = key.toLowerCase();
+      if (k === "transfer-encoding") return;
+      if (k === "content-encoding") return;
       res.setHeader(key, value);
     });
     res.setHeader("Access-Control-Allow-Origin", "*");
 
-    // Si el contenido es pequeño, lo cacheamos en RAM y disco opcionalmente.
     const contentLength = Number(upstreamResp.headers.get("content-length") || 0);
     const shouldCacheInRam = contentLength > 0 && contentLength <= MAX_RAM_CACHE_BYTES && !rangeHeader;
 
-    // Si es pequeño -> buffer completo en memoria (rápido para varios requests)
     if (shouldCacheInRam) {
+      // pequeño: buffer completo
       const buffer = Buffer.from(await upstreamResp.arrayBuffer());
-      // guardar en RAM
-      memoryCache.set(target, {
-        headers: Object.fromEntries(upstreamResp.headers.entries()),
-        body: buffer,
-      });
-      // guardar en disco también (opcional)
-      try {
-        fs.writeFileSync(filePath, buffer);
-        enforceDiskLimit();
-      } catch (e) {
-        console.warn("No se pudo escribir cache disco (pequeño):", e.message);
-      }
-      res.status(upstreamResp.status).send(buffer);
-      return;
+      memoryCache.set(target, { headers: Object.fromEntries(upstreamResp.headers.entries()), body: buffer });
+      try { fs.writeFileSync(filePath, buffer); enforceDiskLimit(); } catch (e) { /* ignore */ }
+      return res.status(upstreamResp.status).send(buffer);
     }
 
-    // Para archivos grandes: hacemos streaming. Duplicamos el stream:
-    // response.body -> pipe a res AND a archivo en disco (si se quiere).
-    const bodyStream = upstreamResp.body;
-    if (!bodyStream) {
-      return res.status(500).json({ error: "Origen no devolvió body" });
+    // GRANDE: stream. Convertimos WHATWG ReadableStream a Node Readable (fromWeb)
+    const upstreamBody = upstreamResp.body;
+    if (!upstreamBody) return res.status(500).json({ error: "Origen no devolvió body" });
+
+    // Node 18+: Readable.fromWeb
+    let nodeStream;
+    try {
+      nodeStream = Readable.fromWeb(upstreamBody);
+    } catch (e) {
+      // fallback: si por alguna razón no funciona, intentar arrayBuffer streaming (menos ideal)
+      console.warn("No se pudo convertir fromWeb:", e.message || e);
+      const buf = Buffer.from(await upstreamResp.arrayBuffer());
+      // escribir y enviar
+      try { fs.writeFileSync(filePath, buf); enforceDiskLimit(); } catch (err) {}
+      res.setHeader("Content-Length", buf.length);
+      return res.status(upstreamResp.status).send(buf);
     }
 
-    // Si queremos cachear en disco (archivo grande), lo escribimos mientras enviamos.
-    // NOTA: esto puede consumir espacio en disco; enforceDiskLimit() después.
-    const writeToDisk = true; // ajustar según preferencia
-    let fileWriteStream = null;
+    // Duplicar stream: uno a cliente, otro a disco (si lo soportás)
+    const writeToDisk = true;
+    let fileWrite = null;
     if (writeToDisk) {
       try {
-        fileWriteStream = fs.createWriteStream(filePath);
+        fileWrite = fs.createWriteStream(filePath);
       } catch (e) {
-        console.warn("No se pudo crear write stream disco:", e.message);
-        fileWriteStream = null;
+        fileWrite = null;
+        console.warn("No se pudo abrir cache disco:", e.message || e);
       }
     }
 
-    // duplicador: passtrough para enviar al cliente
-    const clientPass = new PassThrough();
-
-    // si tenemos fileWriteStream, también hacemos pipe hacia allá
-    bodyStream.pipe(clientPass);
-    if (fileWriteStream) {
-      bodyStream.pipe(fileWriteStream).on("error", (err) => {
-        console.warn("Error escribiendo cache disco (stream):", err.message);
-      });
-    }
-
-    // Enviar al cliente con pipeline para capturar errores
-    res.status(upstreamResp.status);
-    streamPipeline(clientPass, res).catch((err) => {
-      // Si el cliente corta la conexión, puede caer aquí
-      console.warn("Error en pipeline cliente:", err.message);
-      // cleanup: si fileWriteStream existe y el archivo es parcial, lo dejamos o borramos según pref
-      try {
-        if (fileWriteStream) fileWriteStream.close();
-      } catch (e) {}
+    const pass = new PassThrough();
+    // pipe upstream -> pass (y opcionalmente a file)
+    nodeStream.on("error", (err) => {
+      console.warn("Error stream upstream:", err && err.message ? err.message : err);
+      try { if (!res.headersSent) res.status(500).json({ error: "Error en upstream stream" }); else res.end(); } catch (e) {}
     });
 
-    // Cuando termine de escribir al disco, aplicamos política de limpieza
-    if (fileWriteStream) {
-      fileWriteStream.on("finish", () => {
+    nodeStream.pipe(pass);
+    if (fileWrite) {
+      // hay que recrear otro stream para escritura (pipe a file). Como no podemos "multi-pipe" el mismo nodeStream
+      // lo hacemos duplicando mediante PassThrough: upstream -> two PassThroughs.
+      // Mejor: crear dos PassThrough y pipe upstream into both using pipeline:
+      const passForFile = new PassThrough();
+      // Repipe: nodeStream -> both passes by piping nodeStream into passForFile and pass (we already piped into pass),
+      // so instead: unpipe y rehacer: (simple approach: pipe nodeStream into both via 'nodeStream.pipe(pass); nodeStream.pipe(passForFile);')
+      try {
+        // Duplicate by piping upstream to both (most streams allow multiple pipe targets)
+        nodeStream.pipe(passForFile);
+        passForFile.pipe(fileWrite).on("error", (e) => {
+          console.warn("Error escribiendo cache disco (stream):", e.message || e);
+        });
+      } catch (e) {
+        console.warn("No se pudo duplicar stream para disco:", e.message || e);
+      }
+    }
+
+    // Pipe al cliente
+    res.status(upstreamResp.status);
+    streamPipeline(pass, res).catch((err) => {
+      console.warn("Cliente cortó la conexión o error en pipeline:", err && err.message ? err.message : err);
+      try { if (!res.headersSent) res.end(); } catch (e) {}
+    });
+
+    // Cuando termine escritura a disco, forzar limpieza
+    if (fileWrite) {
+      fileWrite.on("finish", () => {
         enforceDiskLimit();
       });
     }
   } catch (err) {
     console.error("Error interno en proxy:", err && err.stack ? err.stack : err);
-    // si ya se enviaron headers, intenta terminar la conexión; sino responde JSON
     try {
       if (!res.headersSent) res.status(500).json({ error: "Error interno en proxy" });
       else res.end();
@@ -287,11 +255,10 @@ app.get("/proxy/*", async (req, res) => {
   }
 });
 
-// Ruta simple para comprobar que está vivo
 app.get("/", (req, res) => {
-  res.json({ ok: true, note: "MediaFlow Proxy (robusto). Protegido por contraseña." });
+  res.json({ ok: true, note: "MediaFlow Proxy (mejorado). Protegido por contraseña." });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MediaFlow Proxy PRO escuchando en :${PORT} (API_PASSWORD: ${API_PASSWORD ? "SET" : "NOT SET"})`);
+  console.log(`🚀 MediaFlow Proxy escuchando en :${PORT} (API_PASSWORD: ${API_PASSWORD ? "SET" : "NOT SET"})`);
 });
