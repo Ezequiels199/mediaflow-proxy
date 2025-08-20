@@ -1,10 +1,9 @@
 {
   "name": "mediaflow-proxy",
-  "version": "1.0.1",
+  "version": "1.0.0",
+  "description": "Proxy avanzado para streaming con cache RAM+Disco y soporte Range",
   "type": "module",
-  "engines": {
-    "node": ">=18"
-  },
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
@@ -13,6 +12,9 @@
     "express": "^4.18.2",
     "mime-types": "^2.1.35",
     "node-cache": "^5.1.2",
-    "undici": "^5.23.0"
+    "undici": "^5.28.4"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
