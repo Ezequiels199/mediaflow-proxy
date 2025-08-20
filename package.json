@@ -1,20 +1,21 @@
 {
-  "name": "mediaflow-proxy",
+  "name": "mediaflow-proxy-with-resolvers",
   "version": "1.0.0",
-  "description": "Proxy avanzado para streaming con cache RAM+Disco y soporte Range",
+  "description": "MediaFlow proxy PRO + resolvers (seguro, sin scrapers)",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "compression": "^1.7.4",
-    "express": "^4.18.2",
-    "mime-types": "^2.1.35",
-    "node-cache": "^5.1.2",
-    "undici": "^5.28.4"
-  },
   "engines": {
-    "node": ">=18.x"
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "compression": "^1.7.4",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2",
+    "mime-types": "^2.1.35",
+    "morgan": "^1.10.0"
   }
 }
