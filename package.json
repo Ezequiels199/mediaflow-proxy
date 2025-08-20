@@ -1,11 +1,12 @@
 {
-  "name": "mediaflow-proxy",
+  "name": "mediaflow-proxy-pro",
   "version": "1.0.0",
-  "description": "MediaFlow proxy robusto",
   "main": "index.js",
-  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "compression": "^1.7.4",
