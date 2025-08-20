@@ -1,66 +1,56 @@
 import express from "express";
-import fetch from "node-fetch";
 import compression from "compression";
+import fetch from "node-fetch";
 import NodeCache from "node-cache";
-import fs from "fs";
-import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 🔑 Contraseña LEGAL
+// 🔑 Contraseña (puedes cambiarla)
 const API_PASSWORD = "superclave123";
 
-// 🗄️ Cache en memoria (6 horas)
-const memoryCache = new NodeCache({ stdTTL: 21600, checkperiod: 120 });
+// 🗄️ Cache en memoria (3 horas)
+const memoryCache = new NodeCache({ stdTTL: 10800, checkperiod: 120 });
 
-// 📂 Carpeta de cache en disco
-const CACHE_DIR = path.join(process.cwd(), "disk_cache");
-if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
-
-// 📏 Límite de cache en disco (20GB)
-const DISK_CACHE_LIMIT = 20 * 1024 * 1024 * 1024;
-
-function getDiskUsage() {
-  const files = fs.readdirSync(CACHE_DIR);
-  let totalSize = 0;
-  const fileList = files.map((file) => {
-    const filePath = path.join(CACHE_DIR, file);
-    const stats = fs.statSync(filePath);
-    totalSize += stats.size;
-    return { file, filePath, size: stats.size, mtime: stats.mtime };
-  });
-  return { totalSize, fileList };
-}
-
-function enforceDiskLimit() {
-  let { totalSize, fileList } = getDiskUsage();
-  if (totalSize <= DISK_CACHE_LIMIT) return;
-
-  console.log("⚠️ Caché en disco excedida, limpiando...");
-  fileList.sort((a, b) => a.mtime - b.mtime); // borra los más viejos
-  for (const file of fileList) {
-    fs.unlinkSync(file.filePath);
-    totalSize -= file.size;
-    if (totalSize <= DISK_CACHE_LIMIT) break;
-  }
-}
-
+// Compresión gzip/brotli
 app.use(compression({ level: 6 }));
 
-// 🔒 Middleware de autenticación LEGAL
+// Middleware de autenticación
 app.use("/proxy", (req, res, next) => {
-  const pass =
-    req.query.password ||
-    req.query.api_password ||
-    req.headers["x-api-password"];
+  const pass = req.query.password || req.headers["x-api-password"];
   if (pass !== API_PASSWORD) {
     return res.status(401).json({ error: "Contraseña inválida" });
   }
   next();
 });
 
-// 🚀 Proxy con cache
+// ========================
+// 📌 LEGAL RESOLVERS 😉
+// ========================
+
+async function resolverDirecto(url) {
+  // sirve para cualquier mp4/mkv/m3u8 público
+  return url;
+}
+
+async function resolverMixdrop(url) {
+  // Simulación legal 😉
+  if (url.includes("mixdrop")) {
+    return url; // en la realidad deberías resolverlo, aquí lo devolvemos directo
+  }
+  return null;
+}
+
+async function resolverStreamtape(url) {
+  if (url.includes("streamtape")) {
+    return url;
+  }
+  return null;
+}
+
+// ========================
+// 📌 PROXY
+// ========================
 app.get("/proxy/*", async (req, res) => {
   try {
     const targetUrl = req.params[0];
@@ -68,57 +58,48 @@ app.get("/proxy/*", async (req, res) => {
       return res.status(400).json({ error: "Falta la URL de destino" });
     }
 
-    const fileName = Buffer.from(targetUrl).toString("base64") + ".cache";
-    const filePath = path.join(CACHE_DIR, fileName);
+    // resolvemos "LEGALMENTE" 😉
+    let resolvedUrl =
+      (await resolverDirecto(targetUrl)) ||
+      (await resolverMixdrop(targetUrl)) ||
+      (await resolverStreamtape(targetUrl));
 
-    // ✅ RAM
-    if (memoryCache.has(targetUrl)) {
-      console.log("Sirviendo desde RAM:", targetUrl);
-      const cached = memoryCache.get(targetUrl);
+    if (!resolvedUrl) {
+      return res.status(404).json({ error: "URL no soportada" });
+    }
+
+    // Cache en memoria
+    if (memoryCache.has(resolvedUrl)) {
+      console.log("✅ Sirviendo desde RAM:", resolvedUrl);
+      const cached = memoryCache.get(resolvedUrl);
       res.writeHead(200, cached.headers);
       return res.end(cached.body);
     }
 
-    // ✅ Disco
-    if (fs.existsSync(filePath)) {
-      console.log("Sirviendo desde DISCO:", targetUrl);
-      const data = fs.readFileSync(filePath);
-      res.writeHead(200, { "Content-Type": "application/octet-stream" });
-      return res.end(data);
-    }
-
-    // 🌐 Descarga LEGAL desde internet
-    console.log("Descargando desde origen:", targetUrl);
-    const response = await fetch(targetUrl, {
+    console.log("⬇️ Descargando desde origen:", resolvedUrl);
+    const response = await fetch(resolvedUrl, {
       headers: { Range: req.headers.range || "" },
     });
 
-    if (!response.ok) {
-      return res.status(response.status).json({ error: "Error al obtener el archivo" });
-    }
+    const headers = {};
+    response.headers.forEach((v, k) => (headers[k] = v));
 
     let bodyBuffer = Buffer.from([]);
     for await (const chunk of response.body) {
       bodyBuffer = Buffer.concat([bodyBuffer, chunk]);
     }
 
-    const headers = {};
-    response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-    memoryCache.set(targetUrl, { headers, body: bodyBuffer });
-
-    fs.writeFileSync(filePath, bodyBuffer);
-    enforceDiskLimit();
+    // guardar en RAM
+    memoryCache.set(resolvedUrl, { headers, body: bodyBuffer });
 
     res.writeHead(response.status, headers);
     res.end(bodyBuffer);
   } catch (err) {
-    console.error("Error en proxy:", err);
+    console.error("❌ Error en proxy:", err);
     res.status(500).json({ error: "Error en el proxy" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor LEGAL en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor LEGAL corriendo en http://localhost:${PORT}`);
 });
