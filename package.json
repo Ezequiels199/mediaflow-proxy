@@ -1,7 +1,7 @@
 {
   "name": "mediaflow-proxy",
   "version": "1.0.0",
-  "description": "Proxy para Stremio con soporte de múltiples fuentes",
+  "description": "Proxy para Stremio con soporte de múltiples fuentes y mayor seguridad",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -11,6 +11,10 @@
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
     "morgan": "^1.10.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "dotenv": "^16.4.5",
+    "axios": "^1.6.7",
+    "compression": "^1.7.4"
   }
 }
