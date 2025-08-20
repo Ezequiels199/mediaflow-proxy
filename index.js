@@ -1,66 +1,128 @@
 import express from "express";
-import cors from "cors";
-import helmet from "helmet";
+import fetch from "node-fetch";
 import compression from "compression";
-import rateLimit from "express-rate-limit";
+import NodeCache from "node-cache";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Seguridad y rendimiento
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
-app.use(compression());
+// 🔑 Contraseña
+const API_PASSWORD = "superclave123";
 
-// Contraseña (env var)
-const API_PASSWORD = process.env.API_PASSWORD || "clave123";
+// 🗄️ Caché en memoria (6 horas)
+const memoryCache = new NodeCache({ stdTTL: 21600, checkperiod: 120 });
 
-// Limita requests para evitar abuso
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
-});
-app.use(limiter);
+// 📂 Carpeta de cache en disco
+const CACHE_DIR = path.join(process.cwd(), "disk_cache");
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
 
-// Middleware de contraseña para rutas /proxy
+// 📏 Límite total de caché en disco (20GB)
+const DISK_CACHE_LIMIT = 20 * 1024 * 1024 * 1024;
+
+// 🛠 Función para calcular uso actual del disco
+function getDiskUsage() {
+  const files = fs.readdirSync(CACHE_DIR);
+  let totalSize = 0;
+  const fileList = files.map((file) => {
+    const filePath = path.join(CACHE_DIR, file);
+    const stats = fs.statSync(filePath);
+    totalSize += stats.size;
+    return { file, filePath, size: stats.size, mtime: stats.mtime };
+  });
+  return { totalSize, fileList };
+}
+
+// 🛠 Función para liberar espacio si se excede el límite
+function enforceDiskLimit() {
+  let { totalSize, fileList } = getDiskUsage();
+  if (totalSize <= DISK_CACHE_LIMIT) return;
+
+  console.log("⚠️ Caché en disco excedida, limpiando...");
+  fileList.sort((a, b) => a.mtime - b.mtime); // borra los más viejos
+  for (const file of fileList) {
+    fs.unlinkSync(file.filePath);
+    totalSize -= file.size;
+    if (totalSize <= DISK_CACHE_LIMIT) break;
+  }
+}
+
+// Compresión gzip/brotli
+app.use(compression({ level: 6 }));
+
+// Middleware de autenticación
 app.use("/proxy", (req, res, next) => {
-  const pass = req.query.password || req.headers["x-api-password"];
+  const pass =
+    req.query.password ||
+    req.query.api_password ||
+    req.headers["x-api-password"];
   if (pass !== API_PASSWORD) {
     return res.status(401).json({ error: "Contraseña inválida" });
   }
   next();
 });
 
-// Forzar HTTPS en producción
-app.use((req, res, next) => {
-  if (process.env.NODE_ENV === "production" && req.headers["x-forwarded-proto"] !== "https") {
-    return res.redirect("https://" + req.headers.host + req.url);
+// Proxy con cache mixto
+app.get("/proxy/*", async (req, res) => {
+  try {
+    const targetUrl = req.params[0];
+    if (!targetUrl) {
+      return res.status(400).json({ error: "Falta la URL de destino" });
+    }
+
+    const fileName = Buffer.from(targetUrl).toString("base64") + ".cache";
+    const filePath = path.join(CACHE_DIR, fileName);
+
+    // ✅ Primero RAM
+    if (memoryCache.has(targetUrl)) {
+      console.log("Sirviendo desde RAM:", targetUrl);
+      const cached = memoryCache.get(targetUrl);
+      res.writeHead(200, cached.headers);
+      return res.end(cached.body);
+    }
+
+    // ✅ Luego disco
+    if (fs.existsSync(filePath)) {
+      console.log("Sirviendo desde DISCO:", targetUrl);
+      const data = fs.readFileSync(filePath);
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      return res.end(data);
+    }
+
+    // ⬇️ Descargar de internet
+    console.log("Descargando desde origen:", targetUrl);
+    const response = await fetch(targetUrl, {
+      headers: { Range: req.headers.range || "" },
+    });
+
+    let bodyBuffer = Buffer.from([]);
+    for await (const chunk of response.body) {
+      bodyBuffer = Buffer.concat([bodyBuffer, chunk]);
+    }
+
+    // Guardar en RAM
+    const headers = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+    memoryCache.set(targetUrl, { headers, body: bodyBuffer });
+
+    // Guardar en disco
+    fs.writeFileSync(filePath, bodyBuffer);
+
+    // Aplicar límite en disco
+    enforceDiskLimit();
+
+    // Enviar al cliente
+    res.writeHead(response.status, headers);
+    res.end(bodyBuffer);
+  } catch (err) {
+    console.error("Error en proxy:", err);
+    res.status(500).json({ error: "Error en el proxy" });
   }
-  next();
 });
 
-// Ruta de test
-app.get("/proxy/ip", (req, res) => {
-  res.json({
-    ok: true,
-    ip: req.ip,
-    service: "🚀 MediaFlow Proxy PRO activo",
-  });
-});
-
-// Ruta para proxy de streams
-app.get("/proxy/stream", (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: "Falta parámetro ?url=" });
-  res.json({
-    ok: true,
-    proxy: "MediaFlow Proxy PRO",
-    target: url,
-  });
-});
-
-// Arranque
 app.listen(PORT, () => {
-  console.log(`✅ Servidor PRO corriendo en puerto ${PORT}`);
+  console.log(`🚀 Servidor en http://localhost:${PORT}`);
 });
