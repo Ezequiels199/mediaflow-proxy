@@ -1,21 +1,33 @@
 {
-  "name": "mediaflow-proxy-with-resolvers",
-  "version": "1.0.0",
-  "description": "MediaFlow proxy PRO + resolvers (seguro, sin scrapers)",
-  "type": "module",
+  "name": "mediaflow-proxy",
+  "version": "2.0.0",
+  "description": "Proxy avanzado con caché RAM+Disco, compresión, autenticación y resolvers LEGAL GUIÑO 😉",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "proxy",
+    "stremio",
+    "video",
+    "cache",
+    "resolver",
+    "media"
+  ],
+  "author": "TuNombre",
+  "license": "MIT",
+  "dependencies": {
+    "compression": "^1.7.4",
+    "express": "^4.19.2",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "compression": "^1.7.4",
-    "node-cache": "^5.1.2",
-    "node-fetch": "^3.3.2",
-    "mime-types": "^2.1.35",
-    "morgan": "^1.10.0"
+    "node": ">=18.0.0"
   }
 }
