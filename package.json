@@ -1,7 +1,7 @@
 {
   "name": "mediaflow-proxy",
-  "version": "3.0.0",
-  "description": "Servidor proxy optimizado para manejar streams grandes y requests externos.",
+  "version": "3.2.0",
+  "description": "Servidor proxy avanzado y robusto para streaming, manejo de archivos grandes, URLs externas y seguridad con Express.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -9,12 +9,15 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
     "axios": "^1.6.8",
-    "lru-cache": "^10.2.0",
+    "node-fetch": "^3.3.2",
     "cors": "^2.8.5",
     "morgan": "^1.10.0",
-    "compression": "^1.7.4"
+    "compression": "^1.7.4",
+    "helmet": "^7.0.0",
+    "lru-cache": "^10.2.0",
+    "http-proxy-middleware": "^3.0.0",
+    "cookie-parser": "^1.4.6"
   },
   "engines": {
     "node": "18.x"
@@ -23,7 +26,10 @@
     "proxy",
     "media",
     "streaming",
-    "server"
+    "server",
+    "security",
+    "express",
+    "robust"
   ],
   "author": "TuNombre",
   "license": "MIT"
