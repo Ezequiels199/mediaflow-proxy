@@ -1,7 +1,7 @@
 {
   "name": "mediaflow-pro",
   "version": "1.0.0",
-  "description": "Servidor Express avanzado con soporte para streams, cookies y requests externos.",
+  "description": "Servidor Express avanzado con soporte para streams, cookies, seguridad y requests externos.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
     "tough-cookie": "^4.1.3",
     "morgan": "^1.10.0",
     "cors": "^2.8.5",
-    "compression": "^1.7.4"
+    "compression": "^1.7.4",
+    "helmet": "^7.1.0"
   },
   "engines": {
     "node": ">=18.x"
@@ -24,6 +25,7 @@
     "proxy",
     "streams",
     "cookies",
+    "security",
     "mediaflow"
   ],
   "author": "Ezequiels199",
