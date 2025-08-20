@@ -1,28 +1,15 @@
 {
   "name": "mediaflow-proxy",
-  "version": "1.0.0",
-  "description": "Proxy ligero para manejar streams de gran tamaño en Render",
+  "version": "2.0.0",
+  "description": "Proxy robusto para streams grandes (Mixdrop, Stremio, etc.)",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
-  "keywords": [
-    "proxy",
-    "streaming",
-    "stremio",
-    "video",
-    "mediaflow"
-  ],
-  "author": "TuNombre",
-  "license": "MIT",
   "dependencies": {
-    "cors": "^2.8.5",
     "express": "^4.19.2",
     "morgan": "^1.10.0",
+    "cors": "^2.8.5",
     "node-fetch": "^3.3.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
   }
 }
