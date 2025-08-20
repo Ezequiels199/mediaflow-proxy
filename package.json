@@ -1,7 +1,7 @@
 {
-  "name": "mediaflow-legal",
+  "name": "mediaflow-proxy-legal",
   "version": "1.0.0",
-  "description": "Proxy LEGAL super pro con cache en RAM y disco",
+  "description": "Proxy legal para Stremio con resolvers legales 😉",
   "main": "index.js",
   "type": "module",
   "scripts": {
