@@ -1,33 +1,20 @@
 {
-  "name": "mediaflow-pro",
-  "version": "1.0.0",
-  "description": "Servidor Express avanzado con soporte para streams, cookies, seguridad y requests externos.",
-  "main": "index.js",
+  "name": "mediaflow-proxy",
+  "version": "2.0.0",
+  "description": "Proxy avanzado para Stremio (Mixdrop, Streamtape, Doodstream, archivos grandes).",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.7",
-    "axios-cookiejar-support": "^6.0.1",
-    "tough-cookie": "^4.1.3",
-    "morgan": "^1.10.0",
-    "cors": "^2.8.5",
     "compression": "^1.7.4",
-    "helmet": "^7.1.0"
+    "express": "^4.18.2",
+    "helmet": "^7.0.0",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
-    "node": ">=18.x"
+    "node": ">=16.x"
   },
-  "keywords": [
-    "express",
-    "proxy",
-    "streams",
-    "cookies",
-    "security",
-    "mediaflow"
-  ],
-  "author": "Ezequiels199",
   "license": "MIT"
 }
