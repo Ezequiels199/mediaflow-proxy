@@ -1,7 +1,7 @@
 {
   "name": "mediaflow-proxy",
   "version": "1.0.1",
-  "description": "MediaFlow proxy pro - cache mixto y streaming optimizado",
+  "description": "MediaFlow proxy pro - cache mixto y streaming optimizado + addon",
   "main": "index.js",
   "type": "module",
   "scripts": {
