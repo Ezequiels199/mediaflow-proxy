@@ -1,69 +1,77 @@
-// index.js
 import express from "express";
 import helmet from "helmet";
 import compression from "compression";
-import cors from "cors";
-import morgan from "morgan";
-import axios from "axios";
-import { wrapper } from "axios-cookiejar-support";
-import { CookieJar } from "tough-cookie";
+import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY || "superclave123";
 
-// Seguridad básica
+// Seguridad y compresión
 app.use(helmet());
-
-// Compresión de respuestas
 app.use(compression());
 
-// Permitir CORS (todas las URLs)
-app.use(cors());
+// Middleware para archivos grandes (streams largos)
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
-// Logs de requests
-app.use(morgan("dev"));
-
-// Middleware para parsear JSON
-app.use(express.json());
-
-// Cliente HTTP con soporte de cookies
-const jar = new CookieJar();
-const client = wrapper(axios.create({ jar }));
-
-// Ruta de prueba
-app.get("/", (req, res) => {
-  res.json({ status: "✅ Servidor corriendo PRO", time: new Date() });
+// Middleware de autenticación
+app.use((req, res, next) => {
+  const key = req.query.api_password;
+  if (key !== API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
 });
 
-// Ruta para consumir una URL externa y devolver su contenido
-app.get("/proxy", async (req, res) => {
+// Ruta base
+app.get("/", (req, res) => {
+  res.json({ status: "MediaFlow proxy funcionando ✅" });
+});
+
+// --- Resolver rápido MixDrop ---
+app.get("/resolver/mixdrop", async (req, res) => {
   try {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "Falta parámetro ?url=" });
 
-    const response = await client.get(url, { responseType: "stream" });
-
-    // Pipe del stream al cliente
-    response.data.pipe(res);
+    const html = await fetch(url).then(r => r.text());
+    const match = html.match(/MDCore\.wurl\s*=\s*"([^"]+)"/);
+    if (match) {
+      return res.json({ stream: match[1] });
+    } else {
+      return res.status(404).json({ error: "No se encontró stream en MixDrop" });
+    }
   } catch (err) {
-    console.error("Error en /proxy:", err.message);
-    res.status(500).json({ error: "No se pudo procesar la URL externa" });
+    res.status(500).json({ error: "Error resolviendo MixDrop", details: err.message });
   }
 });
 
-// Ruta para testear cookies
-app.get("/cookies", async (req, res) => {
+// --- Resolver rápido StreamTape ---
+app.get("/resolver/streamtape", async (req, res) => {
   try {
-    await client.get("https://httpbin.org/cookies/set?mycookie=test123");
-    const cookieResp = await client.get("https://httpbin.org/cookies");
-    res.json(cookieResp.data);
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Falta parámetro ?url=" });
+
+    const html = await fetch(url).then(r => r.text());
+    const match = html.match(/document\.getElementById\('videolink'\)\.innerHTML\s*=\s*"([^"]+)"/);
+    if (match) {
+      const finalUrl = "https:" + match[1].replace(/&amp;/g, "&");
+      return res.json({ stream: finalUrl });
+    } else {
+      return res.status(404).json({ error: "No se encontró stream en StreamTape" });
+    }
   } catch (err) {
-    console.error("Error en /cookies:", err.message);
-    res.status(500).json({ error: "No se pudo manejar cookies" });
+    res.status(500).json({ error: "Error resolviendo StreamTape", details: err.message });
   }
 });
 
-// Iniciar servidor
+// Proxy de prueba
+app.get("/proxy/ip", (req, res) => {
+  res.json({ ip: req.ip, api: "ok" });
+});
+
+// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor PRO corriendo en puerto ${PORT}`);
+  console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
