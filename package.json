@@ -1,25 +1,29 @@
 {
   "name": "mediaflow-pro",
   "version": "1.0.0",
-  "description": "Servidor Node.js robusto para manejar streams grandes, URLs externas y soporte de cookies.",
+  "description": "Servidor Express avanzado con soporte para streams, cookies y requests externos.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "express": "^4.18.2",
     "axios": "^1.6.7",
-    "axios-cookiejar-support": "^6.0.0",
-    "tough-cookie": "^4.1.3"
+    "axios-cookiejar-support": "^6.0.1",
+    "tough-cookie": "^4.1.3",
+    "morgan": "^1.10.0",
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.x"
   },
   "keywords": [
-    "streaming",
-    "cookies",
+    "express",
     "proxy",
-    "media",
-    "nodejs"
+    "streams",
+    "cookies",
+    "mediaflow"
   ],
   "author": "Ezequiels199",
   "license": "MIT"
