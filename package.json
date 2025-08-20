@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Proxy avanzado para Stremio y MediaFusion con soporte de streams grandes y resolvers.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
