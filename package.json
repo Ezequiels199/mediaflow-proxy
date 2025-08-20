@@ -1,16 +1,17 @@
 {
   "name": "mediaflow-proxy",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "version": "2.0.0",
+  "description": "Proxy optimizado y seguro para MediaFusion / Stremio",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "http-proxy-middleware": "^2.0.6",
-    "pino-http": "^9.0.0"
+    "express-rate-limit": "^6.7.0",
+    "helmet": "^7.0.0"
   }
 }
