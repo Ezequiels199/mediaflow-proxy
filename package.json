@@ -1,14 +1,27 @@
 {
   "name": "mediaflow-proxy",
   "version": "1.0.0",
-  "description": "Proxy seguro para servir videos con autenticación",
+  "description": "Proxy robusto para MediaFlow con Express",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "http-proxy-middleware": "^2.0.6",
-    "cors": "^2.8.5"
-  }
+    "morgan": "^1.10.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "proxy",
+    "express",
+    "mediaflow",
+    "hls",
+    "mkv",
+    "streaming"
+  ],
+  "author": "TuNombre",
+  "license": "MIT"
 }
