@@ -1,39 +1,51 @@
-# Usar Python oficial
+# Usa una imagen oficial de Python
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# evitar preguntas interactivas
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# instalar dependencias de sistema necesarias para compilar ruedas si hace falta
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-     build-essential \
-     gcc \
-     libxml2-dev \
-     libxslt1-dev \
-     zlib1g-dev \
-     libffi-dev \
-     libssl-dev \
-     pkg-config \
-     curl \
-     cargo \
-     rustc \
-  && rm -rf /var/lib/apt/lists/*
+# instalar dependencias del sistema necesarias para lxml, aiohttp, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    curl \
+    git \
+    pkg-config \
+    libxml2-dev \
+    libxslt1-dev \
+    zlib1g-dev \
+    libffi-dev \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
+# instalar rust (rustup) para paquetes que requieren compilación con Rust (maturin/pyo3)
+# -y para no preguntar
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+
+# asegurar que cargo/rust estén en el PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# actualizar pip, wheel y setuptools
+RUN pip install --upgrade pip setuptools wheel
+
+# crear directorio de trabajo
 WORKDIR /app
 
-# copiar requirements primero para aprovechar cache
-COPY requirements.txt /app/requirements.txt
+# copiar e instalar dependencias primero (cache layer)
+COPY requisitos.txt requirements.txt ./ 2>/dev/null || true
+# si tu requirements se llama "requirements.txt" usa esa; en tu repo veo "requisitos.txt" también
+# intenta instalar lo que exista
+RUN if [ -f "requisitos.txt" ]; then pip install --no-cache-dir -r requisitos.txt; fi \
+ && if [ -f "requirements.txt" ]; then pip install --no-cache-dir -r requirements.txt; fi
 
-# pip actualizado y luego instalar requirements
-RUN python -m pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# copiar el resto de la app
+COPY . .
 
-# copiar el resto del proyecto
-COPY . /app
+# Exponer puerto (ajustalo si usás otro)
+EXPOSE 8000
 
-# puerto por defecto; Render inyecta $PORT, usamos fallback 10000
-ENV PORT 10000
-
-# Comando de inicio — usa la variable de entorno PORT si está definida
-ENTRYPOINT ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# Comando por defecto (ajustalo según cómo inicies tu app)
+# Si usás uvicorn directamente: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000", "--workers", "1"]
