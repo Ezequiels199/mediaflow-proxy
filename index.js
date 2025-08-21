@@ -1,133 +1,138 @@
-const express = require('express');
-const fetch = require('node-fetch');
-const NodeCache = require('node-cache');
-const WebTorrent = require('webtorrent');
-const compression = require('compression');
-const cors = require('cors');
-const dotenv = require('dotenv');
-const fs = require('fs');
-const path = require('path');
-const { PassThrough } = require('stream');
+// index.js - MediaFlow Proxy Moderno (Node.js 22)
 
-// Cargar variables de entorno (incluida API_KEY para autenticación)
-dotenv.config();
-const API_KEY = process.env.API_KEY || 'clave_por_defecto';
+import express from "express";
+import compression from "compression";
+import NodeCache from "node-cache";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(compression());  // Habilitar compresión gzip/brotli0
-app.use(cors());         // Habilitar CORS (acceso desde cualquier origen)
-
-const memCache = new NodeCache({ stdTTL: 600, checkperiod: 120 }); 
-const DISK_CACHE_DIR = path.join(__dirname, 'media_cache');
-if (!fs.existsSync(DISK_CACHE_DIR)) fs.mkdirSync(DISK_CACHE_DIR);
-
-const torrentClient = new WebTorrent(); // Cliente para torrents12
-
-// Middleware de autenticación por clave/token (en cabeceras o query)
-app.use((req, res, next) => {
-    const token = req.headers['x-api-key'] || req.query.token;
-    if (!token || token !== API_KEY) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-    next();
-});
-
-// Ruta para streaming HLS (archivo .m3u8)
-// Reescribe las URLs de segmentos para que pasen por /proxy3
-app.get('/hls', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('Missing url parameter');
-
-    // Servir playlist desde caché de memoria si existe
-    if (memCache.has(targetUrl)) {
-        res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        return res.send(memCache.get(targetUrl));
-    }
-
-    try {
-        const response = await fetch(targetUrl);
-        if (!response.ok) return res.status(502).send('Error fetching playlist');
-        const playlist = await response.text();
-        const lines = playlist.split('\n');
-        // Reescribir cada línea de segmento que no es comentario
-        const proxiedLines = lines.map(line => {
-            if (line && !line.startsWith('#')) {
-                // Resolver URL absoluta del segmento HLS
-                const segmentUrl = new URL(line, targetUrl).href;
-                // Proxy hacia /proxy para cada segmento
-                return `${req.protocol}://${req.get('host')}/proxy?url=${encodeURIComponent(segmentUrl)}`;
-            }
-            return line;
-        });
-        const modified = proxiedLines.join('\n');
-        memCache.set(targetUrl, modified); // Cachear playlist reescrito
-        res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        res.send(modified);
-    } catch (err) {
-        console.error('HLS error:', err);
-        res.status(500).send('Internal server error');
-    }
-});
-
-// Ruta genérica /proxy para streaming de archivos (mp4, mkv, .ts, etc.)
-// Soporta HTTP Range (descargas parciales)4 y guarda en caché en disco
-app.get('/proxy', async (req, res) => {
-    const fileUrl = req.query.url;
-    if (!fileUrl) return res.status(400).send('Missing url parameter');
-
-    const range = req.headers.range || '';
-    const opts = { headers: {} };
-    if (range) opts.headers['Range'] = range;
-
-    // Verificar caché en disco para peticiones completas (sin rango)
-    const cachePath = path.join(DISK_CACHE_DIR, encodeURIComponent(fileUrl));
-    if (!range && fs.existsSync(cachePath)) {
-        return res.sendFile(cachePath);
-    }
-
-    try {
-        const response = await fetch(fileUrl, opts);
-        if (!response.ok && response.status !== 206) {
-            return res.status(502).send('Error fetching file');
-        }
-        // Ajustar código de estado y cabeceras
-        res.status(response.status);
-        response.headers.forEach((value, key) => res.setHeader(key, value));
-        const readStream = response.body;
-
-        if (!range) {
-            // Duplicar stream: uno al cliente y otro al disco para caché futura
-            const pass = new PassThrough();
-            const fileStream = fs.createWriteStream(cachePath);
-            readStream.pipe(pass);
-            pass.pipe(res);
-            pass.pipe(fileStream);
-        } else {
-            // Para rangos, solo transmitir al cliente
-            readStream.pipe(res);
-        }
-    } catch (err) {
-        console.error('Proxy error:', err);
-        res.status(500).send('Internal server error');
-    }
-});
-
-// Streaming desde enlaces torrent (magnet)
-// Selecciona el primer archivo de video (.mp4, .mkv, .avi)56
-app.get('/torrent', (req, res) => {
-    const magnet = req.query.magnet;
-    if (!magnet) return res.status(400).send('Missing magnet parameter');
-
-    torrentClient.add(magnet, torrent => {
-        const file = torrent.files.find(f => /\.(mp4|mkv|avi)$/i.test(f.name)) || torrent.files[0];
-        res.setHeader('Content-Length', file.length);
-        res.setHeader('Content-Type', 'video/mp4');
-        // Streaming del archivo torrent al cliente
-        file.createReadStream().pipe(res);
-    });
-});
-
 const PORT = process.env.PORT || 3000;
+
+// 🔑 Contraseña configurable (por seguridad usa variable de entorno en producción)
+const API_PASSWORD = process.env.API_PASSWORD || "8080";
+
+// 🗄️ Caché en memoria (6 horas)
+const memoryCache = new NodeCache({ stdTTL: 21600, checkperiod: 120 });
+
+// 📂 Carpeta de cache en disco
+const CACHE_DIR = path.join(__dirname, "disk_cache");
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
+
+// 📏 Límite total de caché en disco (20GB)
+const DISK_CACHE_LIMIT = 20 * 1024 * 1024 * 1024;
+
+// 🛠 Función para calcular uso actual del disco
+function getDiskUsage() {
+  const files = fs.readdirSync(CACHE_DIR);
+  let totalSize = 0;
+  const fileList = files.map((file) => {
+    const filePath = path.join(CACHE_DIR, file);
+    const stats = fs.statSync(filePath);
+    totalSize += stats.size;
+    return { file, filePath, size: stats.size, mtime: stats.mtime };
+  });
+  return { totalSize, fileList };
+}
+
+// 🛠 Función para liberar espacio si se excede el límite
+function enforceDiskLimit() {
+  let { totalSize, fileList } = getDiskUsage();
+  if (totalSize <= DISK_CACHE_LIMIT) return;
+
+  console.log("⚠️ Caché en disco excedida, limpiando...");
+  fileList.sort((a, b) => a.mtime - b.mtime); // borra los más viejos
+  for (const file of fileList) {
+    fs.unlinkSync(file.filePath);
+    totalSize -= file.size;
+    if (totalSize <= DISK_CACHE_LIMIT) break;
+  }
+}
+
+// ⚡ Middlewares
+app.use(compression({ level: 6 }));
+
+// 🔒 Middleware de autenticación
+app.use("/proxy", (req, res, next) => {
+  const pass =
+    req.query.password ||
+    req.query.api_password ||
+    req.headers["x-api-password"];
+  if (pass !== API_PASSWORD) {
+    return res.status(401).json({ error: "Contraseña inválida" });
+  }
+  next();
+});
+
+// 🚀 Proxy moderno
+app.get("/proxy/*", async (req, res) => {
+  try {
+    const targetUrl = decodeURIComponent(req.params[0]);
+    if (!targetUrl) {
+      return res.status(400).json({ error: "Falta la URL de destino" });
+    }
+
+    const fileName = Buffer.from(targetUrl).toString("base64") + ".cache";
+    const filePath = path.join(CACHE_DIR, fileName);
+
+    // ✅ Primero RAM
+    if (memoryCache.has(targetUrl)) {
+      console.log("⚡ Sirviendo desde RAM:", targetUrl);
+      const cached = memoryCache.get(targetUrl);
+      res.writeHead(200, cached.headers);
+      return res.end(cached.body);
+    }
+
+    // ✅ Luego disco
+    if (fs.existsSync(filePath)) {
+      console.log("💾 Sirviendo desde DISCO:", targetUrl);
+      const data = fs.readFileSync(filePath);
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      return res.end(data);
+    }
+
+    // ⬇️ Descargar de internet usando fetch nativo
+    console.log("🌍 Descargando desde origen:", targetUrl);
+    const response = await fetch(targetUrl, {
+      headers: { Range: req.headers.range || "" },
+    });
+
+    if (!response.ok) {
+      return res
+        .status(response.status)
+        .json({ error: `Error al obtener: ${response.statusText}` });
+    }
+
+    const headers = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    // 📥 Buffer dinámico (optimizado para gigas)
+    let bodyBuffer = Buffer.alloc(0);
+    for await (const chunk of response.body) {
+      bodyBuffer = Buffer.concat([bodyBuffer, chunk]);
+    }
+
+    // Guardar en RAM
+    memoryCache.set(targetUrl, { headers, body: bodyBuffer });
+
+    // Guardar en disco
+    fs.writeFileSync(filePath, bodyBuffer);
+    enforceDiskLimit();
+
+    // Enviar al cliente
+    res.writeHead(response.status, headers);
+    res.end(bodyBuffer);
+  } catch (err) {
+    console.error("❌ Error en proxy:", err);
+    res.status(500).json({ error: "Error en el proxy" });
+  }
+});
+
+// 🟢 Inicio
 app.listen(PORT, () => {
-    console.log(`Media proxy corriendo en puerto ${PORT}`);
+  console.log(`🚀 MediaFlow PRO (Node 22) en http://localhost:${PORT}`);
 });
