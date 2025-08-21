@@ -1,11 +1,24 @@
+# extractors/base.py
+from abc import ABC, abstractmethod
+
 class ExtractorError(Exception):
-    """Error personalizado para fallos en extractores"""
     pass
 
+class BaseExtractor(ABC):
+    """
+    Clase base: los extractores deben heredar de esto e implementar extract(url)
+    """
+    name: str = "base"
 
-class BaseExtractor:
-    """
-    Clase base para todos los extractores.
-    """
+    @abstractmethod
     def extract(self, url: str) -> dict:
-        raise NotImplementedError("El extractor debe implementar el método extract")
+        """
+        Debe devolver un dict JSON-serializable con al menos:
+        - destination_url
+        - content_type
+        - format
+        - size (opcional)
+        - note (opcional)
+        O lanzar ExtractorError en caso de fallo.
+        """
+        raise NotImplementedError
