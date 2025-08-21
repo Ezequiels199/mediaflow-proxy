@@ -1,3 +1,8 @@
+class ExtractorError(Exception):
+    """Error personalizado para fallos en extractores"""
+    pass
+
+
 class BaseExtractor:
     """
     Clase base para todos los extractores.
