@@ -1,84 +1,108 @@
-import sys
-import types
-import importlib.util
+# main.py
+import pkgutil
+import importlib
+import inspect
+import logging
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from typing import Dict, Any, Optional
 
-# Base de la app
-app = FastAPI(title="Mediaflow Proxy")
-BASE_DIR = Path(__file__).parent
-EXTRACTORS_DIR = BASE_DIR / "extractors"
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
-# --- Loader de extractores ---
-def load_module_from_path(path: Path):
-    """
-    Carga un extractor desde archivo y lo registra como
-    mediaflow_proxy.extractors.<nombre>
-    """
-    project_root = str(BASE_DIR)
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
+# importar la clase base (asegurate de que extractors/base.py exista)
+from extractors.base import BaseExtractor, ExtractorError
 
-    pkg_base = "mediaflow_proxy"
-    pkg_extractors = f"{pkg_base}.extractors"
-    module_name = f"{pkg_extractors}.{path.stem}"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mediaflow-proxy")
 
-    # asegurar que exista mediaflow_proxy en sys.modules
-    if pkg_base not in sys.modules:
-        pkg = types.ModuleType(pkg_base)
-        pkg.__path__ = [project_root]
-        sys.modules[pkg_base] = pkg
+app = FastAPI(title="MediaFlow Proxy - Extractors loader")
 
-    # asegurar subpaquete extractors
-    if pkg_extractors not in sys.modules:
-        subpkg = types.ModuleType(pkg_extractors)
-        subpkg.__path__ = [str(EXTRACTORS_DIR)]
-        sys.modules[pkg_extractors] = subpkg
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET","POST","OPTIONS"],
+    allow_headers=["*"]
+)
 
-    # cargar módulo
-    spec = importlib.util.spec_from_file_location(module_name, str(path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"No se pudo crear spec para {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+# Registro de extractores: name -> class
+EXTRACTORS: Dict[str, BaseExtractor] = {}
 
-
-# --- Cargar extractores al inicio ---
-extractors = {}
-
-def discover_and_load_extractors():
-    if not EXTRACTORS_DIR.exists():
-        print(f"⚠ Carpeta {EXTRACTORS_DIR} no existe, sin extractores.")
-        return
-
-    for file in EXTRACTORS_DIR.glob("*.py"):
+def load_extractors():
+    """Carga dinámicamente todos los .py en la carpeta extractors/"""
+    pkg_path = Path(__file__).parent / "extractors"
+    logger.info("Cargando extractores desde: %s", pkg_path)
+    for finder, name, ispkg in pkgutil.iter_modules([str(pkg_path)]):
+        if name.startswith("_"):
+            continue
+        module_name = f"extractors.{name}"
         try:
-            module = load_module_from_path(file)
-            server_name = getattr(module, "server_name", file.stem)
-            extractors[server_name] = module
-            print(f"✅ Cargado extractor: {server_name}")
+            m = importlib.import_module(module_name)
         except Exception as e:
-            print(f"❌ Error al cargar {file.name}: {e}")
+            logger.exception("Error al importar %s: %s", module_name, e)
+            continue
 
-discover_and_load_extractors()
+        # buscar clases
+        for _, obj in inspect.getmembers(m, inspect.isclass):
+            # sólo considerar clases definidas en este módulo
+            if obj.__module__ != m.__name__:
+                continue
+            # Acepta clases que hereden BaseExtractor o que tengan name+extract
+            try:
+                if issubclass(obj, BaseExtractor) and obj is not BaseExtractor:
+                    if hasattr(obj, "name") and hasattr(obj, "extract"):
+                        EXTRACTORS[obj.name] = obj
+                        logger.info("Extractor cargado: %s -> %s", obj.name, module_name)
+                else:
+                    # fallback: clase que tenga name y método extract
+                    if hasattr(obj, "name") and callable(getattr(obj, "extract", None)):
+                        EXTRACTORS[obj.name] = obj
+                        logger.info("Extractor (fallback) cargado: %s -> %s", obj.name, module_name)
+            except Exception as e:
+                logger.exception("Error registrando clase %s: %s", obj, e)
 
-# --- Endpoints ---
-@app.get("/")
-def root():
-    return {"status": "ok", "extractors": list(extractors.keys())}
+# cargar en arranque
+load_extractors()
+
+@app.get("/list")
+def list_extractors():
+    return {"extractors": list(EXTRACTORS.keys())}
 
 @app.get("/resolve")
-def resolve(server: str, url: str):
-    module = extractors.get(server)
-    if not module:
-        raise HTTPException(404, f"Extractor no encontrado: {server}")
+def resolve(
+    server: Optional[str] = Query(None, description="Nombre del extractor (ejemplo, mixdrop...)"),
+    url: str = Query(..., description="URL a resolver")
+) -> Dict[str, Any]:
+    if server:
+        if server not in EXTRACTORS:
+            raise HTTPException(status_code=404, detail=f"Extractor no encontrado: {server}")
+        extractor_cls = EXTRACTORS[server]
+        try:
+            result = extractor_cls.extract(url)
+            return result
+        except ExtractorError as ee:
+            raise HTTPException(status_code=502, detail=str(ee))
+        except NotImplementedError as ne:
+            raise HTTPException(status_code=500, detail=str(ne))
+        except Exception as e:
+            logger.exception("Error extrayendo con %s: %s", server, e)
+            raise HTTPException(status_code=500, detail="Error interno al extraer")
+    else:
+        # autoselección: probar matches()
+        for name, cls in EXTRACTORS.items():
+            try:
+                matches = False
+                if hasattr(cls, "matches"):
+                    matches = cls.matches(url)
+                if matches:
+                    try:
+                        return cls.extract(url)
+                    except Exception as e:
+                        logger.exception("Error extrayendo con %s: %s", name, e)
+                        continue
+            except Exception:
+                continue
+        raise HTTPException(status_code=404, detail="No se encontró extractor que soporte esta URL")
 
-    if not hasattr(module, "extract"):
-        raise HTTPException(500, f"Extractor {server} no tiene función extract()")
-
-    try:
-        return module.extract(url)
-    except Exception as e:
-        raise HTTPException(500, f"Error ejecutando extractor {server}: {e}")
+@app.get("/health")
+def health():
+    return {"status": "ok", "extractors_loaded": len(EXTRACTORS)}
