@@ -1,20 +1,39 @@
-# Imagen base de Python moderna
+# Usar Python oficial
 FROM python:3.11-slim
 
-# Establecer directorio de trabajo
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# instalar dependencias de sistema necesarias para compilar ruedas si hace falta
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+     build-essential \
+     gcc \
+     libxml2-dev \
+     libxslt1-dev \
+     zlib1g-dev \
+     libffi-dev \
+     libssl-dev \
+     pkg-config \
+     curl \
+     cargo \
+     rustc \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copiar dependencias primero (para aprovechar cache en builds)
-COPY requirements.txt .
+# copiar requirements primero para aprovechar cache
+COPY requirements.txt /app/requirements.txt
 
-# Instalar dependencias
-RUN pip install --no-cache-dir -r requirements.txt
+# pip actualizado y luego instalar requirements
+RUN python -m pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copiar el resto del proyecto
-COPY . .
+# copiar el resto del proyecto
+COPY . /app
 
-# Exponer el puerto que va a usar Render
-EXPOSE 10000
+# puerto por defecto; Render inyecta $PORT, usamos fallback 10000
+ENV PORT 10000
 
-# Comando de inicio (Render ejecuta esto)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Comando de inicio — usa la variable de entorno PORT si está definida
+ENTRYPOINT ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
