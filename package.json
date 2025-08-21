@@ -1,31 +1,17 @@
 {
-  "name": "mediaflow-proxy",
-  "version": "2.0.0",
-  "description": "MediaFlow Proxy PRO moderno para Stremio (Node.js 22+)",
-  "main": "index.js",
+  "name": "mediaflow-proxy-modern",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "dev": "NODE_ENV=development nodemon index.js"
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
     "compression": "^1.7.4",
     "express": "^4.19.2",
+    "morgan": "^1.10.0",
     "node-cache": "^5.1.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "keywords": [
-    "stremio",
-    "proxy",
-    "mediaflow",
-    "video",
-    "cache"
-  ],
-  "author": "TuNombre",
-  "license": "MIT"
+  }
 }
