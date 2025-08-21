@@ -1,156 +1,97 @@
-# main.py (PRO) - reemplaza tu main.py con esto
+# main.py
 import os
-import asyncio
-import logging
-import traceback
-import importlib
 import pkgutil
-from importlib import resources
-from typing import Dict, Any
+import importlib
+import asyncio
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Depends, Query, HTTPException, Security
-from fastapi.security import APIKeyQuery, APIKeyHeader
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
-from starlette.staticfiles import StaticFiles
+APP_PORT = int(os.environ.get("PORT", 10000))
+API_PASSWORD = os.environ.get("API_PASSWORD", "")
 
-# intentamos importar settings (tu módulo). Si falla, informamos.
-try:
-    from mediaflow_proxy.configs import settings
-except Exception:
-    settings = None
+app = FastAPI(title="Mediaflow Proxy (minimal)", version="0.1")
 
-# ---------------------------------------------------------
-# Config / secrets
-# ---------------------------------------------------------
-API_PASSWORD = os.getenv("API_PASSWORD") or (settings.api_password if settings and hasattr(settings, "api_password") else None)
-# Nombre del parámetro de query que usan clientes (ej: ?password=xxx)
-API_PASSWORD_QUERY_NAME = os.getenv("API_PASSWORD_QUERY_NAME", "password")
-# Header alternativo
-API_PASSWORD_HEADER_NAME = os.getenv("API_PASSWORD_HEADER_NAME", "x-api-password")
+# registro: nombre -> módulo del extractor
+EXTRACTORS: Dict[str, Any] = {}
 
-# Security deps
-api_key_query = APIKeyQuery(name=API_PASSWORD_QUERY_NAME, auto_error=False)
-api_key_header = APIKeyHeader(name=API_PASSWORD_HEADER_NAME, auto_error=False)
+def load_extractors():
+    """
+    Carga dinámicamente todos los módulos de la carpeta 'extractors'.
+    Cada módulo debe exportar:
+      - server_name (str)  OR usaremos el nombre del archivo
+      - async def resolve(url: str) -> dict
+    """
+    base_path = os.path.join(os.path.dirname(__file__), "extractors")
+    if not os.path.isdir(base_path):
+        app.logger = getattr(app, "logger", None)
+        return
 
-async def verify_api_key(key_query: str = Security(api_key_query), key_header: str = Security(api_key_header)):
-    """Dependency: valida la API key vía query o header o env"""
-    provided = key_query or key_header
-    if API_PASSWORD is None:
-        # Si no hay contraseña configurada, permitimos (modo dev)
-        return True
-    if provided != API_PASSWORD:
-        raise HTTPException(status_code=401, detail="Contraseña inválida")
-    return True
-
-# ---------------------------------------------------------
-# App
-# ---------------------------------------------------------
-app = FastAPI(title="MediaFlow Proxy PRO", version="2.0")
-
-# CORS minimal (ajustá orígenes en producción)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # en producción limitar
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# middleware adicional si existe en tu proyecto
-try:
-    from mediaflow_proxy.middleware import UIAccessControlMiddleware
-    app.add_middleware(UIAccessControlMiddleware)
-except Exception:
-    # no crítico: si no existe, seguimos
-    pass
-
-# ---------------------------------------------------------
-# Cargar routers si están disponibles
-# ---------------------------------------------------------
-try:
-    from mediaflow_proxy.routes import (
-        proxy_router,
-        extractor_router,
-        speedtest_router,
-        playlist_builder_router,
-    )
-    app.include_router(proxy_router, prefix="/proxy", tags=["proxy"], dependencies=[Depends(verify_api_key)])
-    app.include_router(extractor_router, prefix="/extractor", tags=["extractor"], dependencies=[Depends(verify_api_key)])
-    app.include_router(speedtest_router, prefix="/speedtest", tags=["speedtest"], dependencies=[Depends(verify_api_key)])
-    app.include_router(playlist_builder_router, prefix="/playlist", tags=["playlist"])
-except Exception as e:
-    # Si no existen routers aún, logueamos y continuamos. Evita que fallo de import bloquee el arranque.
-    logging.warning(f" Routers no cargados: {e}")
-
-# ---------------------------------------------------------
-# Auto-load extractors (si usás el paquete mediaflow_proxy.extractors)
-# ---------------------------------------------------------
-extractor_instances: Dict[str, Any] = {}
-try:
-    import mediaflow_proxy.extractors as extractors_pkg
-    for _, module_name, _ in pkgutil.iter_modules(extractors_pkg.__path__):
+    for finder, name, ispkg in pkgutil.iter_modules([base_path]):
         try:
-            module = importlib.import_module(f"mediaflow_proxy.extractors.{module_name}")
-            if hasattr(module, "Extractor"):
-                extractor_instances[module_name] = module.Extractor()
-                logging.info(f"Extractor cargado: {module_name}")
-        except Exception as ex:
-            logging.exception(f"Error cargando extractor {module_name}: {ex}")
-except Exception:
-    # paquete de extractors no encontrado: seguir sin fallo
-    logging.warning("No se encontró paquete mediaflow_proxy.extractors; crealo o pon los extractores en la carpeta correcta.")
+            mod = importlib.import_module(f"extractors.{name}")
+            server = getattr(mod, "server_name", name)
+            EXTRACTORS[server] = mod
+        except Exception as e:
+            # no abortamos todo si un extractor falla; lo mostramos en logs
+            print(f"[load_extractors] error importando {name}: {e}")
 
-# Endpoint para listar extractores cargados
-@app.get("/extractors")
-def list_extractors():
-    return {"count": len(extractor_instances), "extractors": list(extractor_instances.keys())}
+# cargar en arranque
+load_extractors()
 
-# Resolver usando extractor cargado
-@app.get("/resolve")
-async def resolve(server: str = Query(...), url: str = Query(...), allow: bool = Depends(verify_api_key)):
-    if server not in extractor_instances:
+class ResolveResponse(BaseModel):
+    server: str
+    url: str
+    result: dict
+
+def require_password(provided: Optional[str]):
+    if API_PASSWORD:
+        if not provided or provided != API_PASSWORD:
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+@app.get("/", summary="Status")
+async def status():
+    return {
+        "status": "ok",
+        "extractors": sorted(list(EXTRACTORS.keys())),
+    }
+
+@app.get("/reload_extractors", summary="Recargar extractores")
+async def reload_extractors(password: Optional[str] = Query(None)):
+    require_password(password)
+    EXTRACTORS.clear()
+    load_extractors()
+    return {"reloaded": True, "extractors": sorted(list(EXTRACTORS.keys()))}
+
+@app.get("/resolve", response_model=ResolveResponse)
+async def resolve(
+    server: str = Query(..., description="Nombre del extractor (p.ej. doodstream, mixdrop)"),
+    url: str = Query(..., description="URL a resolver"),
+    password: Optional[str] = Query(None),
+):
+    """
+    Resuelve la URL con el extractor indicado.
+    El extractor debe exponer async def resolve(url) -> dict
+    """
+    require_password(password)
+
+    mod = EXTRACTORS.get(server)
+    if not mod:
         raise HTTPException(status_code=404, detail=f"Extractor '{server}' no encontrado")
-    extractor = extractor_instances[server]
+
+    # preferimos async function named 'resolve', si existe 'extract' lo usamos
+    func = getattr(mod, "resolve", None) or getattr(mod, "extract", None)
+    if func is None:
+        raise HTTPException(status_code=500, detail=f"Extractor '{server}' no tiene función 'resolve' o 'extract'")
+
     try:
-        # timeout para evitar bloqueos largos
-        result = await asyncio.wait_for(extractor.extract(url), timeout=30)
-        return JSONResponse({"status": "ok", "server": server, "data": result})
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Timeout en extractor")
+        if asyncio.iscoroutinefunction(func):
+            result = await func(url)
+        else:
+            # permitir también funciones síncronas
+            result = func(url)
+        return ResolveResponse(server=server, url=url, result=result or {})
     except Exception as e:
-        logging.exception(f"Error en extractor {server}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error en extractor '{server}': {e}")
 
-# Health check
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# Static (servir UI si existe)
-try:
-    static_path = resources.files("mediaflow_proxy").joinpath("static")
-    if static_path.exists():
-        app.mount("/", StaticFiles(directory=str(static_path), html=True), name="static")
-except Exception:
-    # Si no hay assets estáticos no pasa nada
-    logging.info("No se montó carpeta static (no existe o no está empacada).")
-
-# ---------------------------------------------------------
-# Run helper: usa env PORT y WORKERS para ser portable
-# ---------------------------------------------------------
-def run():
-    import uvicorn
-    port = int(os.getenv("PORT", os.getenv("UVICORN_PORT", "10000")))
-    workers = int(os.getenv("WORKERS", os.getenv("WEB_CONCURRENCY", "1")))
-    # En producción preferible usar gunicorn + uvicorn worker; aquí usamos uvicorn.run si workers==1
-    if workers and workers > 1:
-        # consejo: en producción usá gunicorn -k uvicorn.workers.UvicornWorker
-        logging.info(f"Iniciando uvicorn con {workers} workers en puerto {port}")
-        uvicorn.run("main:app", host="0.0.0.0", port=port, workers=workers, log_level="info")
-    else:
-        logging.info(f"Iniciando uvicorn en puerto {port}")
-        uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
-
-if __name__ == "__main__":
-    run()
+# run with: uvicorn main:app --host 0.0.0.0 --port $PORT
