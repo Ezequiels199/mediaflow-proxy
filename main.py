@@ -1,97 +1,166 @@
-# main.py
+# main.py - Mediaflow Proxy (loader de extractores por archivo, robusto)
 import os
-import pkgutil
-import importlib
+import time
+import logging
 import asyncio
-from fastapi import FastAPI, HTTPException, Query
+import importlib.util
+from pathlib import Path
+from typing import Dict, Any, Callable, Optional
+
+from fastapi import FastAPI, Query, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Any, Dict, Optional
+from starlette.responses import JSONResponse
 
-APP_PORT = int(os.environ.get("PORT", 10000))
-API_PASSWORD = os.environ.get("API_PASSWORD", "")
+# ---------- Config ----------
+BASE_DIR = Path(__file__).parent
+EXTRACTORS_DIR = BASE_DIR / "extractors"
+API_PASSWORD = os.getenv("API_PASSWORD", "")  # si está vacía, no protege endpoints
+LOAD_TIMEOUT = float(os.getenv("LOAD_TIMEOUT", "20"))  # timeout para extract
+RESOLVE_TIMEOUT = float(os.getenv("RESOLVE_TIMEOUT", "25"))
 
-app = FastAPI(title="Mediaflow Proxy (minimal)", version="0.1")
+# ---------- Logging ----------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("mediaflow-main")
 
-# registro: nombre -> módulo del extractor
-EXTRACTORS: Dict[str, Any] = {}
+# ---------- App ----------
+app = FastAPI(title="Mediaflow Proxy - Loader dinámico de extractores")
 
-def load_extractors():
-    """
-    Carga dinámicamente todos los módulos de la carpeta 'extractors'.
-    Cada módulo debe exportar:
-      - server_name (str)  OR usaremos el nombre del archivo
-      - async def resolve(url: str) -> dict
-    """
-    base_path = os.path.join(os.path.dirname(__file__), "extractors")
-    if not os.path.isdir(base_path):
-        app.logger = getattr(app, "logger", None)
+# Estructura interna: server_name -> module info
+class ExtractorInfo(BaseModel):
+    server_name: str
+    module_path: str
+    module_obj: Any
+    extract_fn_name: str  # 'extract' or 'resolve'
+    is_async: bool
+    loaded_at: float
+
+EXTRACTORS: Dict[str, ExtractorInfo] = {}
+
+# ---------- Security dependency ----------
+def require_password(password: Optional[str] = Query(None)):
+    """Dep. FastAPI: si API_PASSWORD configurada, exige ?password=..."""
+    if not API_PASSWORD:
+        return True
+    if not password or password != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Contraseña inválida")
+    return True
+
+# ---------- Loader utilities ----------
+def load_module_from_path(path: Path):
+    """Carga un módulo Python dado su path y devuelve el módulo."""
+    name = f"extractor_{int(time.time()*1000)}_{abs(hash(str(path))) % 100000}"
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    if spec is None:
+        raise ImportError(f"No se pudo crear spec para {path}")
+    module = importlib.util.module_from_spec(spec)
+    loader = spec.loader
+    if loader is None:
+        raise ImportError(f"No hay loader para {path}")
+    loader.exec_module(module)
+    return module
+
+def discover_and_load_extractors():
+    """Busca .py en extractors/ y registra extractors en EXTRACTORS."""
+    EXTRACTORS.clear()
+    if not EXTRACTORS_DIR.exists():
+        log.warning("No existe carpeta extractors/ en %s", EXTRACTORS_DIR)
         return
 
-    for finder, name, ispkg in pkgutil.iter_modules([base_path]):
+    for f in sorted(EXTRACTORS_DIR.glob("*.py")):
+        if f.name.startswith("_"):
+            continue  # ignorar archivos privados
         try:
-            mod = importlib.import_module(f"extractors.{name}")
-            server = getattr(mod, "server_name", name)
-            EXTRACTORS[server] = mod
+            module = load_module_from_path(f)
         except Exception as e:
-            # no abortamos todo si un extractor falla; lo mostramos en logs
-            print(f"[load_extractors] error importando {name}: {e}")
+            log.exception("Error importando %s: %s", f.name, e)
+            continue
 
-# cargar en arranque
-load_extractors()
+        # determinar server_name
+        server_name = getattr(module, "server_name", None) or f.stem
+        # preferencia de funciones: 'extract' o 'resolve'
+        extract_fn = getattr(module, "extract", None) or getattr(module, "resolve", None)
+        if extract_fn is None or not callable(extract_fn):
+            log.warning("Módulo %s cargado pero no expone 'extract' ni 'resolve'", f.name)
+            continue
 
-class ResolveResponse(BaseModel):
-    server: str
-    url: str
-    result: dict
+        is_async = asyncio.iscoroutinefunction(extract_fn)
+        info = ExtractorInfo(
+            server_name=server_name,
+            module_path=str(f),
+            module_obj=module,
+            extract_fn_name=extract_fn.__name__,
+            is_async=is_async,
+            loaded_at=time.time()
+        )
+        # si hay conflictos de nombres, avisamos y sobrescribimos
+        if server_name in EXTRACTORS:
+            log.warning("Sobrescribiendo extractor %s con %s", server_name, f.name)
+        EXTRACTORS[server_name] = info
+        log.info("Extractor registrado: %s (async=%s) desde %s", server_name, is_async, f.name)
 
-def require_password(provided: Optional[str]):
-    if API_PASSWORD:
-        if not provided or provided != API_PASSWORD:
-            raise HTTPException(status_code=401, detail="Invalid password")
+# cargar inicialmente
+discover_and_load_extractors()
 
-@app.get("/", summary="Status")
-async def status():
+# ---------- Endpoints ----------
+@app.get("/", summary="Estado y lista de extractores")
+def root():
     return {
         "status": "ok",
-        "extractors": sorted(list(EXTRACTORS.keys())),
+        "extractor_count": len(EXTRACTORS),
+        "extractors": [
+            {"name": name, "path": info.module_path, "async": info.is_async, "loaded_at": info.loaded_at}
+            for name, info in EXTRACTORS.items()
+        ],
     }
 
-@app.get("/reload_extractors", summary="Recargar extractores")
-async def reload_extractors(password: Optional[str] = Query(None)):
-    require_password(password)
-    EXTRACTORS.clear()
-    load_extractors()
-    return {"reloaded": True, "extractors": sorted(list(EXTRACTORS.keys()))}
+@app.get("/health", summary="Healthcheck")
+def health():
+    return {"status": "ok"}
 
-@app.get("/resolve", response_model=ResolveResponse)
-async def resolve(
-    server: str = Query(..., description="Nombre del extractor (p.ej. doodstream, mixdrop)"),
-    url: str = Query(..., description="URL a resolver"),
-    password: Optional[str] = Query(None),
-):
-    """
-    Resuelve la URL con el extractor indicado.
-    El extractor debe exponer async def resolve(url) -> dict
-    """
-    require_password(password)
+@app.post("/reload", summary="Recargar extractores (protegido)")
+def reload_extractors(password: Optional[str] = Query(None), authorized: bool = Depends(require_password)):
+    """Recargar todos los extractores desde disco."""
+    discover_and_load_extractors()
+    return {"reloaded": True, "count": len(EXTRACTORS)}
 
-    mod = EXTRACTORS.get(server)
-    if not mod:
+@app.get("/resolve", summary="Resolver URL con un extractor")
+async def resolve(server: str = Query(...), url: str = Query(...), password: Optional[str] = Query(None), authorized: bool = Depends(require_password)):
+    """Ejecuta el extractor indicado sobre la URL."""
+    info = EXTRACTORS.get(server)
+    if not info:
         raise HTTPException(status_code=404, detail=f"Extractor '{server}' no encontrado")
 
-    # preferimos async function named 'resolve', si existe 'extract' lo usamos
-    func = getattr(mod, "resolve", None) or getattr(mod, "extract", None)
-    if func is None:
-        raise HTTPException(status_code=500, detail=f"Extractor '{server}' no tiene función 'resolve' o 'extract'")
+    # obtener función actual del módulo (por si recargas dinámicamente)
+    fn = getattr(info.module_obj, info.extract_fn_name, None)
+    if not fn or not callable(fn):
+        raise HTTPException(status_code=500, detail="Función de extractor no encontrada o no callable")
 
     try:
-        if asyncio.iscoroutinefunction(func):
-            result = await func(url)
+        # ejecutar con timeout
+        if info.is_async:
+            result = await asyncio.wait_for(fn(url), timeout=RESOLVE_TIMEOUT)
         else:
-            # permitir también funciones síncronas
-            result = func(url)
-        return ResolveResponse(server=server, url=url, result=result or {})
+            # ejecutamos sync en thread pool para no bloquear el event loop
+            loop = asyncio.get_running_loop()
+            result = await asyncio.wait_for(loop.run_in_executor(None, fn, url), timeout=RESOLVE_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timeout en extractor")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en extractor '{server}': {e}")
+        log.exception("Error ejecutando extractor %s: %s", server, e)
+        raise HTTPException(status_code=500, detail=str(e))
 
-# run with: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # validación mínima: debe retornar dict o lista
+    if not isinstance(result, (dict, list)):
+        raise HTTPException(status_code=500, detail="Extractor debe devolver dict o list")
+
+    return JSONResponse({"status": "ok", "server": server, "result": result})
+
+# ---------- Run helper (solo si ejecutás python main.py) ----------
+def run():
+    import uvicorn
+    port = int(os.getenv("PORT", "10000"))
+    # no forzamos workers aquí; mejor usar gunicorn en producción
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, log_level="info")
+
+if __name__ == "__main__":
+    run()
