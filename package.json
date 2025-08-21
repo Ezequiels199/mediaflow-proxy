@@ -1,22 +1,31 @@
 {
-  "name": "media-proxy",
-  "version": "1.0.0",
-  "description": "Proxy multimedia robusto (HLS, archivos grandes, torrents) con autenticación por token",
+  "name": "mediaflow-proxy",
+  "version": "2.0.0",
+  "description": "MediaFlow Proxy PRO moderno para Stremio (Node.js 22+)",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "NODE_ENV=development nodemon index.js"
   },
   "dependencies": {
     "compression": "^1.7.4",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "node-cache": "^5.1.2",
-    "node-fetch": "^2.7.0",
-    "webtorrent": "^0.115.0"
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.0.0"
   },
+  "keywords": [
+    "stremio",
+    "proxy",
+    "mediaflow",
+    "video",
+    "cache"
+  ],
+  "author": "TuNombre",
   "license": "MIT"
 }
