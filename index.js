@@ -1,138 +1,179 @@
-// index.js - MediaFlow Proxy Moderno (Node.js 22)
-
+// index.js - Node 22+ (fetch nativo, AbortSignal.timeout, stream/web)
 import express from "express";
 import compression from "compression";
+import morgan from "morgan";
 import NodeCache from "node-cache";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { finished } from "stream/promises";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 🔑 Contraseña configurable (por seguridad usa variable de entorno en producción)
-const API_PASSWORD = process.env.API_PASSWORD || "8080";
+// Config
+const API_PASSWORD = process.env.PROXY_PASSWORD || "8080";
+const CACHE_DIR = process.env.CACHE_DIR || path.join(process.cwd(), "disk_cache");
+const DISK_CACHE_LIMIT = parseInt(process.env.DISK_CACHE_LIMIT || String(20 * 1024 * 1024 * 1024), 10);
+const RAM_CACHE_MAX_ITEM = parseInt(process.env.RAM_CACHE_MAX_ITEM || String(5 * 1024 * 1024), 10);
+const RAM_CACHE_TTL = parseInt(process.env.RAM_CACHE_TTL || String(60 * 60 * 6), 10);
 
-// 🗄️ Caché en memoria (6 horas)
-const memoryCache = new NodeCache({ stdTTL: 21600, checkperiod: 120 });
+// Crear carpeta cache si no existe
+fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-// 📂 Carpeta de cache en disco
-const CACHE_DIR = path.join(__dirname, "disk_cache");
-if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
+// Cache RAM
+const memoryCache = new NodeCache({ stdTTL: RAM_CACHE_TTL, checkperiod: 120 });
 
-// 📏 Límite total de caché en disco (20GB)
-const DISK_CACHE_LIMIT = 20 * 1024 * 1024 * 1024;
-
-// 🛠 Función para calcular uso actual del disco
-function getDiskUsage() {
+// Helpers
+const safeFilename = (url) => Buffer.from(url).toString("base64url");
+const isHttpUrl = (s) => {
+  try {
+    const u = new URL(s);
+    return ["http:", "https:"].includes(u.protocol);
+  } catch {
+    return false;
+  }
+};
+const filterHeaders = (headers) => {
+  const out = {};
+  for (const [k, v] of headers) {
+    if (!["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"].includes(k.toLowerCase())) {
+      out[k] = v;
+    }
+  }
+  out["Access-Control-Allow-Origin"] = "*";
+  out["Access-Control-Expose-Headers"] = "Content-Length, Content-Type, Accept-Ranges";
+  return out;
+};
+const getDiskUsage = () => {
   const files = fs.readdirSync(CACHE_DIR);
   let totalSize = 0;
-  const fileList = files.map((file) => {
-    const filePath = path.join(CACHE_DIR, file);
-    const stats = fs.statSync(filePath);
-    totalSize += stats.size;
-    return { file, filePath, size: stats.size, mtime: stats.mtime };
-  });
-  return { totalSize, fileList };
-}
-
-// 🛠 Función para liberar espacio si se excede el límite
-function enforceDiskLimit() {
-  let { totalSize, fileList } = getDiskUsage();
+  const list = [];
+  for (const file of files) {
+    const fp = path.join(CACHE_DIR, file);
+    const st = fs.statSync(fp);
+    if (st.isFile()) {
+      totalSize += st.size;
+      list.push({ file, size: st.size, mtimeMs: st.mtimeMs, path: fp });
+    }
+  }
+  return { totalSize, list };
+};
+const enforceDiskLimit = () => {
+  let { totalSize, list } = getDiskUsage();
   if (totalSize <= DISK_CACHE_LIMIT) return;
-
-  console.log("⚠️ Caché en disco excedida, limpiando...");
-  fileList.sort((a, b) => a.mtime - b.mtime); // borra los más viejos
-  for (const file of fileList) {
-    fs.unlinkSync(file.filePath);
-    totalSize -= file.size;
+  list = list.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const f of list) {
+    fs.unlinkSync(f.path);
+    totalSize -= f.size;
     if (totalSize <= DISK_CACHE_LIMIT) break;
   }
-}
+};
 
-// ⚡ Middlewares
+// Middlewares
 app.use(compression({ level: 6 }));
+app.use(morgan("tiny"));
 
-// 🔒 Middleware de autenticación
-app.use("/proxy", (req, res, next) => {
-  const pass =
-    req.query.password ||
-    req.query.api_password ||
-    req.headers["x-api-password"];
-  if (pass !== API_PASSWORD) {
-    return res.status(401).json({ error: "Contraseña inválida" });
-  }
-  next();
+// Health
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString(), diskUsage: getDiskUsage().totalSize });
 });
 
-// 🚀 Proxy moderno
-app.get("/proxy/*", async (req, res) => {
+// Debug auth
+app.get("/debug-auth", (req, res) => {
+  const pass = req.query.password || req.headers["x-api-password"];
+  res.json({ auth: pass === API_PASSWORD });
+});
+
+// Auth middleware
+const auth = (req, res, next) => {
+  const pass = req.query.password || req.headers["x-api-password"];
+  if (pass !== API_PASSWORD) return res.status(401).json({ error: "Auth failed" });
+  next();
+};
+
+// Proxy endpoint
+app.get("/proxy", auth, async (req, res) => {
   try {
-    const targetUrl = decodeURIComponent(req.params[0]);
-    if (!targetUrl) {
-      return res.status(400).json({ error: "Falta la URL de destino" });
-    }
+    const target = req.query.url?.toString();
+    if (!target || !isHttpUrl(target)) return res.status(400).json({ error: "Invalid url" });
 
-    const fileName = Buffer.from(targetUrl).toString("base64") + ".cache";
-    const filePath = path.join(CACHE_DIR, fileName);
+    const range = req.headers.range;
+    const cacheKey = target;
+    const filepath = path.join(CACHE_DIR, safeFilename(target));
 
-    // ✅ Primero RAM
-    if (memoryCache.has(targetUrl)) {
-      console.log("⚡ Sirviendo desde RAM:", targetUrl);
-      const cached = memoryCache.get(targetUrl);
+    // RAM cache
+    if (!range && memoryCache.has(cacheKey)) {
+      const cached = memoryCache.get(cacheKey);
       res.writeHead(200, cached.headers);
       return res.end(cached.body);
     }
 
-    // ✅ Luego disco
-    if (fs.existsSync(filePath)) {
-      console.log("💾 Sirviendo desde DISCO:", targetUrl);
-      const data = fs.readFileSync(filePath);
-      res.writeHead(200, { "Content-Type": "video/mp4" });
-      return res.end(data);
+    // Disk cache
+    if (!range && fs.existsSync(filepath)) {
+      const stat = fs.statSync(filepath);
+      res.writeHead(200, {
+        "Content-Length": stat.size,
+        "Content-Type": "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*"
+      });
+      return fs.createReadStream(filepath).pipe(res);
     }
 
-    // ⬇️ Descargar de internet usando fetch nativo
-    console.log("🌍 Descargando desde origen:", targetUrl);
-    const response = await fetch(targetUrl, {
-      headers: { Range: req.headers.range || "" },
-    });
+    // Fetch origen
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30s
+    const origin = await fetch(target, {
+      headers: range ? { Range: range } : {},
+      signal: controller.signal,
+      redirect: "follow"
+    }).finally(() => clearTimeout(timeout));
 
-    if (!response.ok) {
-      return res
-        .status(response.status)
-        .json({ error: `Error al obtener: ${response.statusText}` });
+    if (!origin.ok && origin.status !== 206) {
+      return res.status(502).json({ error: "Fetch failed", status: origin.status });
     }
 
-    const headers = {};
-    response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
+    const headers = filterHeaders(origin.headers);
+    res.writeHead(origin.status, headers);
 
-    // 📥 Buffer dinámico (optimizado para gigas)
-    let bodyBuffer = Buffer.alloc(0);
-    for await (const chunk of response.body) {
-      bodyBuffer = Buffer.concat([bodyBuffer, chunk]);
+    // Stream
+    const contentLength = Number(origin.headers.get("content-length") || "0");
+    const shouldCacheDisk = !range && contentLength > 0 && contentLength <= DISK_CACHE_LIMIT;
+    const shouldCacheRam = !range && contentLength > 0 && contentLength <= RAM_CACHE_MAX_ITEM;
+
+    if (shouldCacheDisk) {
+      const tmp = filepath + ".tmp";
+      const ws = fs.createWriteStream(tmp);
+      origin.body.pipeTo(ws.writable).catch(() => {});
+      await origin.body.pipeTo(res.writable);
+      await finished(res);
+      fs.renameSync(tmp, filepath);
+      enforceDiskLimit();
+      if (shouldCacheRam) {
+        const buf = fs.readFileSync(filepath);
+        memoryCache.set(cacheKey, { headers, body: buf });
+      }
+    } else if (shouldCacheRam) {
+      const chunks = [];
+      for await (const chunk of origin.body) {
+        chunks.push(chunk);
+        res.write(chunk);
+      }
+      res.end();
+      memoryCache.set(cacheKey, { headers, body: Buffer.concat(chunks) });
+    } else {
+      await origin.body.pipeTo(res.writable);
+      await finished(res);
     }
-
-    // Guardar en RAM
-    memoryCache.set(targetUrl, { headers, body: bodyBuffer });
-
-    // Guardar en disco
-    fs.writeFileSync(filePath, bodyBuffer);
-    enforceDiskLimit();
-
-    // Enviar al cliente
-    res.writeHead(response.status, headers);
-    res.end(bodyBuffer);
   } catch (err) {
-    console.error("❌ Error en proxy:", err);
-    res.status(500).json({ error: "Error en el proxy" });
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
-// 🟢 Inicio
-app.listen(PORT, () => {
-  console.log(`🚀 MediaFlow PRO (Node 22) en http://localhost:${PORT}`);
+// Root
+app.get("/", (req, res) => {
+  res.type("text/plain").send("MediaFlow Proxy PRO - Node 22+");
 });
+
+// Start
+app.listen(PORT, () => console.log(`🚀 Proxy corriendo en puerto ${PORT}`));
