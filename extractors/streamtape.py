@@ -1,166 +1,132 @@
-# streamtape.py
+# extractors/streamtape.py
 import re
-from typing import Dict, Any, Optional
+import time
+import base64
 import requests
+from urllib.parse import urljoin, urlparse
 
-# Ajustá user agent si querés (algunos hosts requieren UA "real")
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# Config
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+TIMEOUT = 12
+MAX_RETRIES = 2
+SLEEP_RETRY = 1.0
 
-# Si tu framework exige una clase basada en BaseExtractor, importala.
-# Si no la tenés, esto seguirá funcionando como EXTRACTOR exportado.
-try:
-    from mediaflow_proxy.base import BaseExtractor, ExtractorError
-except Exception:
-    # definición mínima local para evitar crash si no hay paquete
-    class ExtractorError(Exception):
-        pass
-    class BaseExtractor:
-        pass
+def _get(url, headers=None, allow_redirects=True):
+    headers = headers or {}
+    headers.setdefault("User-Agent", USER_AGENT)
+    try:
+        return requests.get(url, headers=headers, timeout=TIMEOUT, allow_redirects=allow_redirects)
+    except Exception as e:
+        raise
 
-
-class StreamtapeExtractor(BaseExtractor):
-    """
-    Extractor robusto para Streamtape.
-    Uso: colocar este archivo en mediaflow_proxy/extractors/streamtape.py
-    La fábrica del proxy buscará la clase 'Extractor' abajo y la registrará.
-    """
-
-    name = "streamtape"
-
-    def _safe_get(self, url: str, referer: Optional[str] = None, timeout: int = 12) -> requests.Response:
-        headers = DEFAULT_HEADERS.copy()
-        if referer:
-            headers["Referer"] = referer
-        return requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-
-    def _safe_head(self, url: str, referer: Optional[str] = None, timeout: int = 12) -> requests.Response:
-        headers = DEFAULT_HEADERS.copy()
-        if referer:
-            headers["Referer"] = referer
-        return requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
-
-    def _find_get_video_direct(self, html: str) -> Optional[str]:
-        """
-        Busca una URL completa tipo https://streamtape.com/get_video?... en el HTML.
-        """
-        m = re.search(r"https?://(?:www\.)?streamtape\.com/get_video\?[^'\"\s<]+", html)
-        if m:
-            return m.group(0)
-        # también puede aparecer como path relativo /get_video?...
-        m2 = re.search(r"(?:/get_video\?[^'\"\s<]+)", html)
-        if m2:
-            return "https://streamtape.com" + m2.group(0)
-        return None
-
-    def _find_params_id_ip(self, html: str) -> Optional[str]:
-        """
-        Heurística: buscar cadenas que contengan id=... y ip=... (similar a implementaciones comunes).
-        Devuelve el string de query (ej: id=XYZ&ip=1.2.3.4...).
-        """
-        # buscar fragmentos que tengan id= y ip=
-        # patrón menos estricto para adaptarse a variaciones:
-        candidates = re.findall(r"(id=[^'\"\s>]+?&[^'\"\s>]*?ip=[^'\"\s>]+)", html, flags=re.IGNORECASE)
-        if candidates:
-            # devolver el primer candidato que parezca completo
-            return candidates[0]
-        # fallback: buscar id=... solo (algunas versiones)
-        candidates2 = re.findall(r"(id=[^'\"\s>]+)", html, flags=re.IGNORECASE)
-        if candidates2:
-            return candidates2[0]
-        return None
-
-    def extract(self, url: str, **kwargs) -> Dict[str, Any]:
-        """
-        Intenta resolver un video Streamtape y devuelve un dict con:
-          - destination_url: URL final reproducible (normalmente get_video?... o CDN)
-          - content_type (si pudo determinar)
-          - size (Content-Length si pudo obtener)
-          - note: info extra
-        Lanza ExtractorError en caso de fallo.
-        """
-        referer = url
+def _try_fetch_with_retries(url, headers=None, allow_redirects=True):
+    last_exc = None
+    for i in range(MAX_RETRIES + 1):
         try:
-            # 1) GET la página
-            resp = self._safe_get(url, referer=referer)
+            return _get(url, headers=headers, allow_redirects=allow_redirects)
         except Exception as e:
-            raise ExtractorError(f"Error descargando página Streamtape: {e}")
-
-        if resp.status_code != 200:
-            raise ExtractorError(f"Streamtape: página respondió {resp.status_code}")
-
-        html = resp.text
-
-        # 2) Buscar get_video directo primero
-        final = self._find_get_video_direct(html)
-        note = "found get_video direct"
-        # 3) Si no aparece, intentar heurística id=...&ip=...
-        if not final:
-            params = self._find_params_id_ip(html)
-            if params:
-                # asegurar que params no contengan comillas
-                params = params.strip().strip("'\"")
-                final = f"https://streamtape.com/get_video?{params}"
-                note = "built get_video from id/ip params"
-
-        if not final:
-            # 4) última opción: buscar URLs con get_video en scripts minimizados
-            m3 = re.search(r"get_video\?([^'\"\s<]+)", html)
-            if m3:
-                q = m3.group(1)
-                final = f"https://streamtape.com/get_video?{q}"
-                note = "built get_video from script pattern"
-
-        if not final:
-            raise ExtractorError("No se pudo extraer get_video desde la página (heurísticas fallaron)")
-
-        # 5) Probar HEAD al final para verificar que sea accesible y sacar Content-Type/Length
-        try:
-            head = self._safe_head(final, referer=referer)
-            # si HEAD devuelve 405 o parecido, intentar GET con stream para confirmar
-            if head.status_code not in (200, 206):
-                # intentar GET streaming
-                g = requests.get(final, headers={**DEFAULT_HEADERS, "Referer": referer}, stream=True, timeout=12, allow_redirects=True)
-                status_for_meta = g.status_code
-                headers_for_meta = g.headers
+            last_exc = e
+            if i < MAX_RETRIES:
+                time.sleep(SLEEP_RETRY * (i + 1))
             else:
-                status_for_meta = head.status_code
-                headers_for_meta = head.headers
-        except Exception:
-            # si falla el HEAD, no lo descartamos: devolvemos final y nota
-            return {
-                "destination_url": final,
-                "content_type": None,
-                "size": None,
-                "note": f"{note} (HEAD falló, se devuelve URL sin metadatos)"
-            }
+                raise last_exc
 
-        # si status OK, extraer content-type y size
-        content_type = headers_for_meta.get("Content-Type")
-        content_length = headers_for_meta.get("Content-Length")
-        size = int(content_length) if content_length and content_length.isdigit() else None
+def _absolute(base, maybe_rel):
+    try:
+        return urljoin(base, maybe_rel)
+    except:
+        return maybe_rel
 
-        if status_for_meta not in (200, 206):
-            # aún así devolvemos la URL pero avisamos
-            return {
-                "destination_url": final,
-                "content_type": content_type,
-                "size": size,
-                "note": f"{note} (HEAD/GET status {status_for_meta})"
-            }
+def extract(target_url):
+    """
+    Extractor robusto para StreamTape.
+    Devuelve dict: {'url': <direct_url>, 'headers': {..}} o {'error': '...'}
+    """
+    try:
+        parsed = urlparse(target_url)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://streamtape.com"
 
-        return {
-            "destination_url": final,
-            "content_type": content_type,
-            "size": size,
-            "note": note
-        }
+        # 1) GET la página principal (embed o enlace)
+        try:
+            r = _try_fetch_with_retries(target_url, headers={"User-Agent": USER_AGENT, "Referer": base})
+        except Exception as e:
+            return {"error": f"No se pudo descargar la página: {str(e)}"}
 
+        text = r.text or ""
 
-# Para la fábrica que importará 'Extractor' como clase
-class Extractor(StreamtapeExtractor):
-    pass
+        # 2) Pattern más común: /get_video?... (relative o absolute)
+        m = re.search(r'(/get_video\?[^"\'\s<>]+)', text)
+        if not m:
+            # buscar también la versión completa con domain
+            m = re.search(r'(https?://[^"\'\s<>]*?/get_video\?[^"\'\s<>]+)', text)
+
+        if m:
+            gv = _absolute(base, m.group(1))
+            try:
+                r2 = _try_fetch_with_retries(gv, headers={"User-Agent": USER_AGENT, "Referer": target_url}, allow_redirects=True)
+            except Exception as e:
+                return {"error": f"Error al pedir get_video: {str(e)}"}
+
+            # Si devuelve JSON con url:
+            try:
+                j = r2.json()
+                if isinstance(j, dict):
+                    # buscar campo "url" u otras claves comunes
+                    for k in ("url","file","video","link"):
+                        if k in j and j[k]:
+                            final = j[k]
+                            return {"url": final, "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+            except Exception:
+                pass
+
+            # Si r2 redirigió a la url final, r2.url será ella
+            final_url = r2.url
+            # si en el body vino un link directo, extraemos
+            mm = re.search(r'(https?://[^\s"\'<>]+(?:\.mp4|/get_video\?[^"\'<>]+|/d/[^"\'<>]+))', r2.text or "")
+            if mm:
+                final_url = mm.group(1)
+
+            return {"url": final_url, "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+
+        # 3) Buscar enlace directo a .mp4 en la página (a veces lo inyectan)
+        m2 = re.search(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', text)
+        if m2:
+            return {"url": m2.group(1), "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+
+        # 4) Buscar atob("...") base64 codificado con url adentro (patrón usado por algunos)
+        m3 = re.search(r'atob\(["\']([A-Za-z0-9+/=]+)["\']\)', text)
+        if m3:
+            try:
+                decoded = base64.b64decode(m3.group(1)).decode('utf-8', errors='ignore')
+                mm = re.search(r'(https?://[^\s"\'<>]+(?:\.mp4|/get_video\?[^"\'<>]+))', decoded)
+                if mm:
+                    return {"url": mm.group(1), "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+            except Exception:
+                pass
+
+        # 5) Buscar scripts con "src" que contengan get_video (otro patrón)
+        m4 = re.search(r'src\s*=\s*["\']([^"\']*get_video[^"\']*)["\']', text, re.IGNORECASE)
+        if m4:
+            gv = _absolute(base, m4.group(1))
+            try:
+                r2 = _try_fetch_with_retries(gv, headers={"User-Agent": USER_AGENT, "Referer": target_url}, allow_redirects=True)
+                # si redirige, use r2.url
+                return {"url": r2.url, "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+            except Exception as e:
+                return {"error": f"Error al seguir script get_video: {str(e)}"}
+
+        # 6) Intentar extraer desde el "data" o variables JS que contengan /get_video
+        mm2 = re.search(r'["\'](\/get_video\?id=[^"\']+)["\']', text)
+        if mm2:
+            gv = _absolute(base, mm2.group(1))
+            try:
+                r2 = _try_fetch_with_retries(gv, headers={"User-Agent": USER_AGENT, "Referer": target_url}, allow_redirects=True)
+                return {"url": r2.url, "headers": {"User-Agent": USER_AGENT, "Referer": target_url}}
+            except Exception as e:
+                return {"error": f"Error al pedir get_video (pattern 6): {str(e)}"}
+
+        # Si llegamos acá, no encontramos nada
+        return {"error": "No se detectó enlace reproducible en la página (pattern not found)"}
+
+    except Exception as e:
+        return {"error": f"Error inesperado: {str(e)}"}
