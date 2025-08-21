@@ -1,0 +1,11 @@
+fastapi==0.103.1
+uvicorn[standard]==0.23.2
+httpx==0.24.1
+aiohttp==3.8.4
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+aiofiles==23.1.0
+python-multipart==0.0.6
+orjson==3.9.8
+regex==2024.7.14
