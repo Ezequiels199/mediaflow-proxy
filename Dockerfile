@@ -1,49 +1,30 @@
-FROM python:3.13.5-slim
+# Imagen base de Python
+FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE="1" \
-    PYTHONUNBUFFERED="1" \
-    PORT="8888" \
-    PIP_NO_CACHE_DIR="1"
+# Variables para no generar .pyc y mejorar salida de logs
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Set work directory
-WORKDIR /mediaflow_proxy
-
-# --- Aggiunta: toolchain + dev libs per lxml (libxml2/libxslt) e amici ---
-# Necessari per lxml (libxml2-dev, libxslt1-dev, zlib1g-dev)
-# e utili per altri pacchetti nativi (build-essential, gcc, pkg-config, libffi-dev)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential gcc pkg-config \
-      libffi-dev \
-      libxml2-dev libxslt1-dev zlib1g-dev \
+# Instalar dependencias del sistema necesarias para lxml y aiohttp
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libxml2-dev \
+    libxslt1-dev \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user
-RUN useradd -m mediaflow_proxy
-RUN chown -R mediaflow_proxy:mediaflow_proxy /mediaflow_proxy
+# Crear directorio de trabajo
+WORKDIR /app
 
-# Set up the PATH to include the user's local bin
-ENV PATH="/home/mediaflow_proxy/.local/bin:$PATH"
+# Copiar requirements.txt e instalar dependencias
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Switch to non-root user
-USER mediaflow_proxy
+# Copiar el resto del proyecto
+COPY . .
 
-# Install Poetry (con --user, come nel tuo file)
-# (facoltativo: pin della versione per build ripetibili)
-RUN pip install --user --no-cache-dir "poetry==2.1.4"
+# Exponer puerto
+EXPOSE 10000
 
-# Copy only requirements to cache them in docker layer
-COPY --chown=mediaflow_proxy:mediaflow_proxy pyproject.toml poetry.lock* /mediaflow_proxy/
-
-# Project initialization:
-RUN poetry config virtualenvs.in-project true \
-    && poetry install --no-interaction --no-ansi --no-root --only main
-
-# Copy project files
-COPY --chown=mediaflow_proxy:mediaflow_proxy . /mediaflow_proxy
-
-# Expose the port the app runs on
-EXPOSE 8888
-
-# Activate virtual environment and run the application with Gunicorn
-CMD ["sh", "-c", "exec poetry run gunicorn mediaflow_proxy.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8888 --timeout 120 --max-requests 500 --max-requests-jitter 200 --access-logfile - --error-logfile - --log-level info --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
+# Comando para iniciar la app
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
