@@ -1,17 +1,13 @@
 {
-  "name": "mediaflow-proxy-modern",
+  "name": "mediaflow-proxy-advanced",
   "version": "1.0.0",
   "type": "module",
+  "engines": { "node": ">=22" },
   "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=22"
+    "start": "node src/index.js"
   },
   "dependencies": {
-    "compression": "^1.7.4",
-    "express": "^4.19.2",
-    "morgan": "^1.10.0",
-    "node-cache": "^5.1.2"
+    "express": "^4.18.2",
+    "mime": "^3.0.0"
   }
 }
