@@ -1,41 +1,42 @@
-from typing import Dict, Type
+# extractors/factory.py
+import importlib
+import pkgutil
+import inspect
+import os
 
-from mediaflow_proxy.extractors.base import BaseExtractor, ExtractorError
-from mediaflow_proxy.extractors.dlhd import DLHDExtractor
-from mediaflow_proxy.extractors.doodstream import DoodStreamExtractor
-from mediaflow_proxy.extractors.livetv import LiveTVExtractor
-from mediaflow_proxy.extractors.maxstream import MaxstreamExtractor
-from mediaflow_proxy.extractors.mixdrop import MixdropExtractor
-from mediaflow_proxy.extractors.okru import OkruExtractor
-from mediaflow_proxy.extractors.streamtape import StreamtapeExtractor
-from mediaflow_proxy.extractors.supervideo import SupervideoExtractor
-from mediaflow_proxy.extractors.uqload import UqloadExtractor
-from mediaflow_proxy.extractors.vavoo import VavooExtractor
-from mediaflow_proxy.extractors.vixcloud import VixCloudExtractor
-from mediaflow_proxy.extractors.fastream import FastreamExtractor
+from .base import BaseExtractor, ExtractorError
 
-class ExtractorFactory:
-    """Factory for creating URL extractors."""
+EXTRACTORS_PKG = "extractors"
 
-    _extractors: Dict[str, Type[BaseExtractor]] = {
-        "Doodstream": DoodStreamExtractor,
-        "Uqload": UqloadExtractor,
-        "Mixdrop": MixdropExtractor,
-        "Streamtape": StreamtapeExtractor,
-        "Supervideo": SupervideoExtractor,
-        "VixCloud": VixCloudExtractor,
-        "Okru": OkruExtractor,
-        "Maxstream": MaxstreamExtractor,
-        "LiveTV": LiveTVExtractor,
-        "DLHD": DLHDExtractor,
-        "Vavoo": VavooExtractor,
-        "Fastream": FastreamExtractor
-    }
+def _iter_modules():
+    pkg = importlib.import_module(EXTRACTORS_PKG)
+    pkg_path = pkg.__path__
+    for finder, name, ispkg in pkgutil.iter_modules(pkg_path):
+        if name.startswith("_"):
+            continue
+        yield name
 
-    @classmethod
-    def get_extractor(cls, host: str, request_headers: dict) -> BaseExtractor:
-        """Get appropriate extractor instance for the given host."""
-        extractor_class = cls._extractors.get(host)
-        if not extractor_class:
-            raise ExtractorError(f"Unsupported host: {host}")
-        return extractor_class(request_headers)
+def get_extractor_names():
+    return sorted(list(_iter_modules()))
+
+def load_extractor(name: str) -> BaseExtractor:
+    # importar el módulo dentro de extractors
+    try:
+        mod = importlib.import_module(f"{EXTRACTORS_PKG}.{name}")
+    except ModuleNotFoundError:
+        raise ExtractorError(f"No existe extractor llamado '{name}'")
+
+    # buscar una clase que herede BaseExtractor o una variable 'extractor' instancia
+    # preferimos una instancia llamada 'extractor'
+    if hasattr(mod, "extractor"):
+        inst = mod.extractor
+        if not isinstance(inst, BaseExtractor):
+            raise ExtractorError(f"El objeto 'extractor' en {name} no es BaseExtractor")
+        return inst
+
+    # si no hay instancia, buscamos clase pública que herede BaseExtractor
+    for _, obj in inspect.getmembers(mod, inspect.isclass):
+        if issubclass(obj, BaseExtractor) and obj is not BaseExtractor:
+            return obj()
+
+    raise ExtractorError(f"Ningún extractor válido encontrado en el módulo '{name}'")
