@@ -1,22 +1,4 @@
-# Core web / ASGI
-fastapi>=0.95.0
-uvicorn[standard]>=0.22.0
-
-# HTTP clients
-requests>=2.31.0
-httpx>=0.24.0
-aiohttp>=3.9.0
-
-# Parsers / scraping (bs4 estaba faltando en tus logs)
-beautifulsoup4>=4.12.2
-lxml>=4.9.3
-
-# Archivos, utilidades
-python-dotenv>=1.0.0
-aiofiles>=23.1.0
-
-# Caching / otras utilidades que podrían usar extractors
-cachetools>=5.3.0
-
-# opcional: si tus extractores usan ffmpeg o similar, no se instala por pip
-# Si necesitas alguna librería más que use un extractor, agrégala aquí.
+fastapi
+uvicorn
+requests
+beautifulsoup4
