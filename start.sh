@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Start script para uvicorn (FastAPI)
-# Permite que Render/Heroku/otros usen $PORT
-PORT="${PORT:-10000}"
-# Opciones recomendadas:
-# --proxy-headers: si está detrás de proxy (Render lo provee)
-# --limit-concurrency y --limit-max-requests podrían configurarse si necesitás reinicios por leak
-exec uvicorn server_render:app \
-  --host 0.0.0.0 \
-  --port "${PORT}" \
-  --workers 1 \
-  --log-level info \
-  --proxy-headers
+# Actualizar pip (evita la advertencia)
+python -m pip install --upgrade pip
+
+# Instalar dependencias
+pip install -r requirements.txt
+
+# Forzar que python busque módulos en el directorio actual (si usás imports locales)
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
+
+# Ejecutar uvicorn (ajusta main:app si tu app tiene otro nombre)
+exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-10000}" --workers 1
