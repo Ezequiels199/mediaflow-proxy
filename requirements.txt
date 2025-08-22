@@ -1,11 +1,7 @@
-pip>=25.2
-setuptools>=65
-wheel
+# --- Dependencias principales ---
+fastapi==0.115.0
+uvicorn==0.30.6
+requests==2.32.3
 
-git+https://github.com/Ezequiels199/mediaflow-proxy.git@main#egg=mediaflow-proxy
-
-uvicorn[standard]>=0.18.0
-fastapi>=0.95.0
-requests>=2.31.0
-httpx>=0.24.0
-python-multipart>=0.0.6
+# --- Tu repo de mediaflow-proxy (usa la branch Main, con M mayúscula) ---
+git+https://github.com/Ezequiels199/mediaflow-proxy.git@Main#egg=mediaflow-proxy
