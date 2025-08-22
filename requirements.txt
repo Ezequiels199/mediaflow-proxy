@@ -1,12 +1,9 @@
-# actualiza pip / setuptools / wheel a versiones recientes
-pip>=24.0
+pip>=25.2
 setuptools>=65
 wheel
 
-# instala el paquete local (asume que hay setup.py / pyproject.toml en la raíz)
--e .
+git+https://github.com/Ezequiels199/mediaflow-proxy.git@main#egg=mediaflow-proxy
 
-# extras que suelen usarse (por si falta algo)
 uvicorn[standard]>=0.18.0
 fastapi>=0.95.0
 requests>=2.31.0
