@@ -1,35 +1,38 @@
-# Dockerfile ligero y seguro para Render (FastAPI + uvicorn)
-FROM python:3.11-slim
+FROM python:3.13.5-slim
 
-# Evitar buffers en stdout para logs en tiempo real
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PORT=10000 \
-    PIP_NO_CACHE_DIR=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE="1"
+ENV PYTHONUNBUFFERED="1"
+ENV PORT="8888"
 
-# Dependencias del SO necesarias (mínimas)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Set work directory
+WORKDIR /mediaflow_proxy
 
-WORKDIR /app
+# Create a non-root user
+RUN useradd -m mediaflow_proxy
+RUN chown -R mediaflow_proxy:mediaflow_proxy /mediaflow_proxy
 
-# Copiar requirments e instalar dependencias antes del código para aprovechar cache de Docker
-COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r /app/requirements.txt
+# Set up the PATH to include the user's local bin
+ENV PATH="/home/mediaflow_proxy/.local/bin:$PATH"
 
-# Crear usuario no-root para mayor seguridad
-RUN useradd --create-home --shell /bin/bash appuser
-USER appuser
+# Switch to non-root user
+USER mediaflow_proxy
 
-# Copiar aplicación
-COPY --chown=appuser:appuser . /app
+# Install Poetry
+RUN pip install --user --no-cache-dir poetry
 
-# Exponer puerto por defecto de Render (usar PORT env en runtime)
-EXPOSE ${PORT}
+# Copy only requirements to cache them in docker layer
+COPY --chown=mediaflow_proxy:mediaflow_proxy pyproject.toml poetry.lock* /mediaflow_proxy/
 
-# Entrypoint: script start.sh (debe ser ejecutable)
-CMD ["./start.sh"]
+# Project initialization:
+RUN poetry config virtualenvs.in-project true \
+    && poetry install --no-interaction --no-ansi --no-root --only main
+
+# Copy project files
+COPY --chown=mediaflow_proxy:mediaflow_proxy . /mediaflow_proxy
+
+# Expose the port the app runs on
+EXPOSE 8888
+
+# Activate virtual environment and run the application with Gunicorn
+CMD ["sh", "-c", "exec poetry run gunicorn mediaflow_proxy.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8888 --timeout 120 --max-requests 500 --max-requests-jitter 200 --access-logfile - --error-logfile - --log-level info --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
