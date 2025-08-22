@@ -1,4 +1,14 @@
-fastapi==0.101.1
-uvicorn[standard]==0.22.0
-httpx==0.25.0
-cachetools==5.4.0
+# actualiza pip / setuptools / wheel a versiones recientes
+pip>=24.0
+setuptools>=65
+wheel
+
+# instala el paquete local (asume que hay setup.py / pyproject.toml en la raíz)
+-e .
+
+# extras que suelen usarse (por si falta algo)
+uvicorn[standard]>=0.18.0
+fastapi>=0.95.0
+requests>=2.31.0
+httpx>=0.24.0
+python-multipart>=0.0.6
