@@ -1,7 +1,4 @@
-# --- Dependencias principales ---
 fastapi==0.115.0
 uvicorn==0.30.6
 requests==2.32.3
-
-# --- Tu repo de mediaflow-proxy (usa la branch Main, con M mayúscula) ---
-git+https://github.com/Ezequiels199/mediaflow-proxy.git@Main#egg=mediaflow-proxy
+python-multipart==0.0.6
