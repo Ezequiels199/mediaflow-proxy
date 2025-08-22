@@ -1,2 +1,2 @@
-mediaflow-proxy
-uvicorn
+requests>=2.28.0
+yt-dlp>=2024.12.0  # opcional, pero recomendado para fallback robusto
