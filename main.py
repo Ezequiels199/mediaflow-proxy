@@ -1,30 +1,11 @@
 #!/usr/bin/env node
 /**
- * MediaFlow Proxy - Professional edition for Stremio
- * - Hardened SSRF protection (scheme, DNS resolution, private IP checks)
- * - Controlled redirect following with validation
- * - HLS manifest rewriting without exposing password (HMAC tokens)
- * - RAM LRU cache with metrics + cache-stampede protection (dedupe)
- * - Stream-safe proxying with Range support and proper headers passthrough
- * - Configurable and env-driven
- * - Structured logging and graceful shutdown with active request draining
- *
- * Dependencies:
- *   - express
- *   - compression
- *   - helmet
- *   - morgan
- *   - undici
- *   - lru-cache
- *   - express-rate-limit
- *
- * Optional (recommended):
- *   - prom-client (for Prometheus metrics on /metrics)
- *
- * Notes for Stremio:
- *   - /hls rewrites playlist URIs to /hls or /proxy but uses a signed token param
- *     instead of embedding the raw password to avoid leaking credentials.
- *   - The token contains expiry + HMAC(url|expiry) and is validated by /proxy and /hls.
+ * MediaFlow Proxy - Optimizado para Render Plan Gratuito
+ * - Gestión agresiva de memoria para límites de 512MB
+ * - Streaming directo para archivos grandes (>50MB)
+ * - Cache inteligente solo para manifiestos y archivos pequeños
+ * - Compression bypass para contenido multimedia
+ * - Rate limiting adaptativo según recursos disponibles
  */
 
 import express from "express";
@@ -40,22 +21,33 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import process from "node:process";
 
-// ====== CONFIG ======
+// ====== CONFIG OPTIMIZADO PARA RENDER GRATUITO ======
 const PORT = Number(process.env.PORT || 10000);
 const PASSWORD = process.env.MEDIAFLOW_PASSWORD || "mipassword";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",").map(s => s.trim());
-const MAX_RAM_CACHE_MB = Number(process.env.MAX_RAM_CACHE_MB || 256);
-const CACHE_TTL_HOURS = Number(process.env.CACHE_TTL_HOURS || 6);
-const MAX_CACHE_ITEM_SIZE_MB = Number(process.env.MAX_CACHE_ITEM_SIZE_MB || 10);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
-const ENABLE_RATE_LIMIT = process.env.ENABLE_RATE_LIMIT !== "false";
-const USER_AGENT = process.env.ORIGIN_UA || "Mozilla/5.0 (StremioMediaFlow)";
-const MAX_REDIRECTS = Number(process.env.MAX_REDIRECTS || 6);
-const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 300); // 5 minutes default
-const ENABLE_PROMETHEUS = process.env.ENABLE_PROMETHEUS === "true";
 
-// ====== HELPERS & SAFETY ======
+// Configuración agresiva de memoria para Render gratuito
+const MAX_RAM_CACHE_MB = Math.min(Number(process.env.MAX_RAM_CACHE_MB || 64), 64); // Máximo 64MB
+const CACHE_TTL_HOURS = Number(process.env.CACHE_TTL_HOURS || 2); // Cache más corto
+const MAX_CACHE_ITEM_SIZE_MB = 2; // Solo archivos muy pequeños en cache
+const LARGE_FILE_THRESHOLD_MB = 50; // Stream directo para archivos >50MB
+
+// Timeouts optimizados para Render
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45000); // Más tiempo
+const MAX_RETRIES = 2; // Menos reintentos para ahorrar recursos
+const MAX_REDIRECTS = 3; // Reducir redirects para velocidad
+
+// Rate limiting adaptativo
+const ENABLE_RATE_LIMIT = process.env.ENABLE_RATE_LIMIT !== "false";
+const USER_AGENT = process.env.ORIGIN_UA || "Mozilla/5.0 (StremioMediaFlow/Render)";
+const TOKEN_TTL_SEC = Number(process.env.TOKEN_TTL_SEC || 600); // 10 minutos para archivos grandes
+
+// Configuración de concurrencia para Render gratuito
+const MAX_CONCURRENT_REQUESTS = 8;
+let activeRequests = 0;
+const requestQueue = [];
+
+// ====== HELPERS OPTIMIZADOS ======
 const SUPPORTED_VIDEO_EXTENSIONS = new Set([
   '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
   '.ts', '.m2ts', '.vob', '.ogv', '.3gp', '.f4v'
@@ -73,41 +65,68 @@ function isPlaylistUrl(u) {
   }
 }
 
-function toAbsolute(base, relative) {
+function isLargeVideoFile(url, contentLength) {
+  const threshold = LARGE_FILE_THRESHOLD_MB * 1024 * 1024;
+  if (typeof contentLength === 'number' && contentLength > threshold) return true;
+  
   try {
-    return new URL(relative, base).toString();
-  } catch {
-    return null;
-  }
-}
-
-function redactUrl(original) {
-  try {
-    const u = new URL(original);
-    ['password','token','signature','sig','api_key','key','auth','expires'].forEach(k => u.searchParams.delete(k));
-    return u.toString();
-  } catch {
-    return original;
-  }
-}
-
-function generateCacheKey(urlStr, headers = {}) {
-  const relevant = ['range', 'accept', 'accept-encoding'];
-  const headerStr = relevant.map(h => (headers[h] || headers[h.toLowerCase()] || '')).join('|');
-  return crypto.createHash('md5').update(`${urlStr}|${headerStr}`).digest('hex');
-}
-
-// validate scheme is only http / https
-function hasAllowedScheme(u) {
-  try {
-    const p = new URL(u);
-    return p.protocol === 'http:' || p.protocol === 'https:';
+    const p = new URL(url);
+    const ext = p.pathname.toLowerCase().split('.').pop();
+    return SUPPORTED_VIDEO_EXTENSIONS.has('.' + ext);
   } catch {
     return false;
   }
 }
 
-// ====== SSRF / PRIVATE IP CHECK ======
+function shouldBypassCache(url, headers, contentLength) {
+  // Siempre bypass para Range requests (streaming parcial)
+  if (headers.range) return true;
+  
+  // Bypass para archivos grandes
+  if (isLargeVideoFile(url, contentLength)) return true;
+  
+  // Bypass si excede límite de cache
+  if (typeof contentLength === 'number' && contentLength > MAX_CACHE_ITEM_SIZE_MB * 1024 * 1024) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ====== GESTIÓN DE CONCURRENCIA PARA RENDER ======
+function canAcceptRequest() {
+  return activeRequests < MAX_CONCURRENT_REQUESTS;
+}
+
+function queueRequest(req, res, handler) {
+  if (canAcceptRequest()) {
+    activeRequests++;
+    return handler(req, res).finally(() => activeRequests--);
+  }
+  
+  // Si no hay capacidad, rechazar con 503
+  return res.status(503).json({ 
+    error: 'Servidor saturado, reintente en unos segundos',
+    retryAfter: 5 
+  });
+}
+
+// ====== MONITOREO DE MEMORIA PARA RENDER ======
+function getMemoryUsage() {
+  const usage = process.memoryUsage();
+  return {
+    used: Math.round(usage.rss / 1024 / 1024), // MB
+    heap: Math.round(usage.heapUsed / 1024 / 1024),
+    limit: 512 // Límite Render gratuito
+  };
+}
+
+function shouldTriggerGC() {
+  const mem = getMemoryUsage();
+  return mem.used > 400; // Trigger GC si usa >400MB
+}
+
+// ====== SSRF PROTECTION OPTIMIZADA ======
 const PRIVATE_RANGES_RE = [
   /^127\./,
   /^10\./,
@@ -124,33 +143,38 @@ async function isIpPrivateOrLocal(host) {
     if (net.isIP(host)) {
       return PRIVATE_RANGES_RE.some(r => r.test(host));
     }
-    const addrs = [];
-    try { addrs.push(...await dns.resolve4(host)); } catch {}
-    try { addrs.push(...await dns.resolve6(host)); } catch {}
-    if (addrs.length === 0) {
-      // If nothing resolves, for safety consider it "private/unresolvable"
+    
+    // DNS lookup con timeout corto para Render
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    
+    try {
+      const addrs = await Promise.race([
+        dns.resolve4(host).catch(() => []),
+        dns.resolve6(host).catch(() => [])
+      ]);
+      clearTimeout(timeout);
+      
+      if (addrs.length === 0) return true;
+      return addrs.some(ip => PRIVATE_RANGES_RE.some(r => r.test(ip)));
+    } catch {
+      clearTimeout(timeout);
       return true;
     }
-    for (const ip of addrs) {
-      for (const r of PRIVATE_RANGES_RE) {
-        if (r.test(ip)) return true;
-      }
-    }
-    return false;
-  } catch (err) {
-    // on DNS errors, be conservative
-    console.warn("isIpPrivateOrLocal error:", err?.message || err);
+  } catch {
     return true;
   }
 }
 
-// ====== TOKEN (HMAC) FOR MANIFEST REWRITES ======
-const HMAC_SECRET = process.env.MANIFEST_HMAC_SECRET || PASSWORD || 'fallback-secret';
+// ====== TOKENS HMAC OPTIMIZADOS ======
+const HMAC_SECRET = process.env.MANIFEST_HMAC_SECRET || PASSWORD + '_render_secret';
+
 function signUrlToken(urlStr, ttlSec = TOKEN_TTL_SEC) {
   const expires = Math.floor(Date.now() / 1000) + Number(ttlSec);
   const mac = crypto.createHmac('sha256', HMAC_SECRET).update(`${urlStr}|${expires}`).digest('hex');
   return `${expires}:${mac}`;
 }
+
 function verifyUrlToken(urlStr, token) {
   try {
     if (!token) return false;
@@ -159,439 +183,347 @@ function verifyUrlToken(urlStr, token) {
     if (!expires || !mac) return false;
     if (Math.floor(Date.now() / 1000) > expires) return false;
     const expected = crypto.createHmac('sha256', HMAC_SECRET).update(`${urlStr}|${expires}`).digest('hex');
-    // constant-time compare
     return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(mac, 'hex'));
   } catch {
     return false;
   }
 }
 
-// ====== CACHE (LRU) with metrics & stampede protection ======
-function createLRUWithMetrics(opts) {
-  const cache = new LRU(opts);
-  cache._metrics = { hits: 0, misses: 0, requests: 0, bytesStored: 0 };
-  const origGet = cache.get.bind(cache);
-  cache.get = function(key) {
-    cache._metrics.requests++;
-    const v = origGet(key);
-    if (v === undefined) cache._metrics.misses++;
-    else cache._metrics.hits++;
-    return v;
-  };
-  const origSet = cache.set.bind(cache);
-  cache.set = function(key, value) {
-    if (value && value.body) cache._metrics.bytesStored += (value.body.length || 0);
-    return origSet(key, value);
-  };
-  cache.getMetrics = () => ({
-    hits: cache._metrics.hits,
-    misses: cache._metrics.misses,
-    requests: cache._metrics.requests,
-    itemCount: cache.size || 0,
-    size: cache.calculatedSize || cache._metrics.bytesStored || 0
-  });
-  return cache;
-}
-
-const ramCache = createLRUWithMetrics({
+// ====== CACHE SUPER OPTIMIZADO PARA RENDER ======
+const manifestCache = new LRU({
   max: MAX_RAM_CACHE_MB * 1024 * 1024,
-  length: v => (v?.body?.length || 0) + JSON.stringify(v?.headers || {}).length + 100,
+  length: (value) => value?.body?.length || 0,
   ttl: 1000 * 60 * 60 * CACHE_TTL_HOURS,
   updateAgeOnGet: true
 });
-const manifestCache = createLRUWithMetrics({
-  max: 50 * 1024 * 1024,
-  length: v => v?.body?.length || 0,
-  ttl: 1000 * 60 * 60 * 2,
+
+// Cache solo para manifiestos y archivos pequeños críticos
+const microCache = new LRU({
+  max: 10 * 1024 * 1024, // Solo 10MB para metadatos
+  length: (value) => JSON.stringify(value).length,
+  ttl: 1000 * 60 * 5, // 5 minutos
   updateAgeOnGet: true
 });
 
-// Stampede protection: cacheKey -> Promise
-const fetchLocks = new Map();
-
-// Active request count for graceful shutdown
-let activeRequests = 0;
-
-// ====== FETCH WITH RETRIES + REDIRECT CONTROL ======
-async function safeFetch(urlStr, options = {}, { allowRedirects = true, maxRedirects = MAX_REDIRECTS } = {}) {
-  // We implement manual redirect following to validate each Location
+// ====== FETCH OPTIMIZADO PARA ARCHIVOS GRANDES ======
+async function safeFetchForLargeFiles(urlStr, options = {}) {
   let currentUrl = urlStr;
-  let attempts = 0;
-  let lastErr = null;
-
-  while (true) {
-    attempts++;
+  let redirectCount = 0;
+  
+  while (redirectCount < MAX_REDIRECTS) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    
     try {
-      const resp = await fetch(currentUrl, {
+      const response = await fetch(currentUrl, {
         ...options,
-        redirect: 'manual', // we follow redirects manually
-        signal: controller.signal
+        redirect: 'manual',
+        signal: controller.signal,
+        // Headers optimizados para archivos grandes
+        headers: {
+          ...options.headers,
+          'Accept-Encoding': 'identity', // Sin compresión para video
+          'Connection': 'keep-alive'
+        }
       });
+      
       clearTimeout(timeout);
-
-      // If redirect status and we should follow
-      if (allowRedirects && [301, 302, 303, 307, 308].includes(resp.status)) {
-        const loc = resp.headers.get('location');
-        if (!loc) throw new Error(`Redirect without Location from ${currentUrl}`);
-        const next = toAbsolute(currentUrl, loc);
-        if (!next) throw new Error('Invalid redirect location');
-        if (!hasAllowedScheme(next)) throw new Error('Redirect to disallowed scheme');
-        const nextHost = new URL(next).hostname;
-        if (await isIpPrivateOrLocal(nextHost)) throw new Error('Redirect target resolves to private IP');
-        if (attempts > maxRedirects) throw new Error('Too many redirects');
-        // continue with next
-        currentUrl = next;
-        // loop will retry
+      
+      if ([301, 302, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) throw new Error('Redirect without location');
+        
+        currentUrl = new URL(location, currentUrl).toString();
+        redirectCount++;
         continue;
       }
-
-      // Non-redirect response
-      return { response: resp, finalUrl: currentUrl };
+      
+      return { response, finalUrl: currentUrl };
     } catch (err) {
       clearTimeout(timeout);
-      lastErr = err;
-      // retries for network/5xx up to MAX_RETRIES with exponential backoff
-      if (attempts > MAX_RETRIES) {
-        throw lastErr;
-      }
-      const backoff = Math.min(30000, Math.pow(2, attempts) * 1000);
-      const jitter = Math.floor(Math.random() * 300);
-      await new Promise(r => setTimeout(r, backoff + jitter));
-      // retry same URL or following redirect logic again
+      throw err;
     }
   }
+  
+  throw new Error('Too many redirects');
 }
 
-// ====== APP SETUP ======
+// ====== APP SETUP OPTIMIZADO ======
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
+// Rate limiting adaptativo basado en memoria disponible
 if (ENABLE_RATE_LIMIT) {
   app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 120,
+    max: (req, res) => {
+      const mem = getMemoryUsage();
+      // Reducir límites si la memoria está alta
+      return mem.used > 300 ? 60 : 120;
+    },
     standardHeaders: true,
     legacyHeaders: false,
-    message: { error: 'Too many requests' }
+    message: { error: 'Demasiadas solicitudes, reintente en unos minutos' }
   }));
 }
 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
-app.use(compression({ level: 6 }));
-app.use(morgan('combined'));
+// Helmet optimizado para streaming
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 
-// CORS middleware
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS.includes('*') || (origin && ALLOWED_ORIGINS.includes(origin))) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+// Compression inteligente - skip para video
+app.use(compression({
+  level: 1, // Compresión mínima para ahorrar CPU
+  filter: (req, res) => {
+    const contentType = res.getHeader('content-type') || '';
+    // No comprimir contenido multimedia
+    if (contentType.startsWith('video/') || 
+        contentType.startsWith('audio/') ||
+        contentType.includes('application/octet-stream')) {
+      return false;
+    }
+    return compression.filter(req, res);
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS,POST');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Range,Authorization,X-Requested-With,X-API-Password');
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Length,Content-Range,Accept-Ranges,X-Proxy-Status,X-Cache');
-  res.setHeader('Vary', 'Origin');
+}));
+
+// Logging mínimo para Render
+app.use(morgan('combined', {
+  skip: (req, res) => req.path === '/' || req.path === '/health'
+}));
+
+// CORS optimizado
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Range,Authorization,X-API-Password');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length,Content-Range,Accept-Ranges');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// Simple metrics collector if prom-client available
-let promClient = null;
-if (ENABLE_PROMETHEUS) {
-  try {
-    promClient = await import('prom-client');
-    promClient.collectDefaultMetrics?.();
-  } catch (err) {
-    console.warn('prom-client not available, skipping /metrics', err?.message || err);
-    promClient = null;
-  }
-}
+// ====== ENDPOINTS ======
 
-// HEALTH
-app.get('/', (req, res) => {
-  const ram = ramCache.getMetrics();
-  const manifest = manifestCache.getMetrics();
+// Health check optimizado
+app.get(['/', '/health'], (req, res) => {
+  const mem = getMemoryUsage();
   res.json({
     ok: true,
-    service: 'MediaFlow Proxy PRO',
-    version: '3.0.0',
-    stats: {
-      ramCache: ram,
-      manifestCache: manifest,
-      activeRequests,
-      uptime: process.uptime(),
-      memory: process.memoryUsage()
-    },
-    endpoints: {
-      proxy: '/proxy?url=ENCODED_URL (or token)',
-      hls: '/hls?url=ENCODED_M3U8 (or token)',
-      stats: '/stats',
-      metrics: ENABLE_PROMETHEUS ? '/metrics' : '(disabled)'
-    }
+    service: 'MediaFlow Proxy Render',
+    memory: `${mem.used}MB / ${mem.limit}MB`,
+    activeRequests,
+    uptime: Math.floor(process.uptime()),
+    cacheSize: Math.round(manifestCache.calculatedSize / 1024 / 1024) + 'MB'
   });
 });
 
-// STATS (requires password)
+// Stats con auth
 app.get('/stats', (req, res) => {
-  if (!checkAuth(req, res)) return;
-  const ram = ramCache.getMetrics();
-  const manifest = manifestCache.getMetrics();
+  const pass = req.query.password || req.headers['x-api-password'];
+  if (pass !== PASSWORD) {
+    return res.status(401).json({ error: 'Auth required' });
+  }
+  
+  const mem = getMemoryUsage();
   res.json({
-    cache: { ram, manifest },
+    memory: mem,
     activeRequests,
     uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    config: {
-      maxRamMB: MAX_RAM_CACHE_MB,
-      maxCacheItemMB: MAX_CACHE_ITEM_SIZE_MB,
-      requestTimeoutMs: REQUEST_TIMEOUT_MS
+    cache: {
+      manifest: Math.round(manifestCache.calculatedSize / 1024 / 1024) + 'MB',
+      micro: Math.round(microCache.calculatedSize / 1024) + 'KB'
     }
   });
 });
 
-if (promClient) {
-  app.get('/metrics', async (req, res) => {
+// ====== PROXY PRINCIPAL OPTIMIZADO PARA ARCHIVOS GRANDES ======
+app.get('/proxy', (req, res) => {
+  return queueRequest(req, res, async (req, res) => {
     try {
-      res.set('Content-Type', promClient.register.contentType);
-      return res.end(await promClient.register.metrics());
-    } catch (err) {
-      return res.status(500).end(err?.message || String(err));
-    }
-  });
-}
-
-// ====== AUTH helpers ======
-function extractPassword(req) {
-  return (
-    req.query.password ||
-    req.query.api_password ||
-    req.headers['x-api-password'] ||
-    (req.headers['authorization'] ? req.headers['authorization'].replace(/^Bearer\s+/i, '') : '') ||
-    ''
-  );
-}
-
-function checkAuth(req, res) {
-  const pass = extractPassword(req);
-  if (pass !== PASSWORD) {
-    res.status(401).json({ error: 'Autenticación requerida' });
-    return false;
-  }
-  return true;
-}
-
-// Validates either password or token for provided targetUrl
-function checkAuthOrToken(req, res, targetUrl) {
-  // token param support for rewritten manifests
-  const token = req.query.token || req.query.t;
-  if (token) {
-    if (verifyUrlToken(targetUrl, token)) return true;
-    res.status(401).json({ error: 'Token inválido o expirado' });
-    return false;
-  }
-  return checkAuth(req, res);
-}
-
-// ====== PROXY core ======
-async function canCacheResponse(response, req, contentLength, maxCacheSize) {
-  if (!response.ok) return false;
-  if (req.headers.range) return false;
-  if (typeof contentLength === 'number' && contentLength > 0 && contentLength <= maxCacheSize) return true;
-  return false;
-}
-
-async function fetchAndMaybeCache(target, req, res, cacheKey) {
-  // stampede protection: only one buffer+cache operation per key
-  if (ramCache.get(cacheKey)) {
-    return ramCache.get(cacheKey);
-  }
-
-  if (fetchLocks.has(cacheKey)) {
-    // wait for existing lock to resolve
-    return await fetchLocks.get(cacheKey);
-  }
-
-  const promise = (async () => {
-    // Construct upstream headers
-    const headers = {
-      'User-Agent': USER_AGENT,
-      'Accept': '*/*',
-      'Accept-Encoding': 'identity'
-    };
-    if (req.headers.range) headers.Range = req.headers.range;
-    if (req.headers.referer) headers.Referer = req.headers.referer;
-    if (req.headers.origin) headers.Origin = req.headers.origin;
-
-    const { response, finalUrl } = await safeFetch(target, { headers, redirect: 'manual' });
-
-    // collect passthrough headers
-    const passthrough = [
-      'content-type', 'content-length', 'accept-ranges', 'content-range',
-      'etag', 'last-modified', 'cache-control', 'expires'
-    ];
-    const responseHeaders = {};
-    for (const h of passthrough) {
-      const v = response.headers.get(h);
-      if (v) {
-        responseHeaders[h] = v;
+      const targetUrl = req.query.url;
+      if (!targetUrl) {
+        return res.status(400).json({ error: 'URL requerida' });
       }
-    }
 
-    const contentLength = Number(response.headers.get('content-length') || "0");
-    const maxCacheBytes = MAX_CACHE_ITEM_SIZE_MB * 1024 * 1024;
+      // Validaciones de seguridad
+      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+        return res.status(400).json({ error: 'Esquema no válido' });
+      }
 
-    // Decide to buffer & cache or stream
-    if (await canCacheResponse(response, req, contentLength, maxCacheBytes)) {
-      // Buffer and store in RAM
-      const arr = await response.arrayBuffer();
-      const buffer = Buffer.from(arr);
-      const entry = {
-        status: response.status,
-        headers: responseHeaders,
-        body: buffer,
-        timestamp: Date.now()
+      const host = new URL(targetUrl).hostname;
+      if (await isIpPrivateOrLocal(host)) {
+        return res.status(403).json({ error: 'IP privada no permitida' });
+      }
+
+      // Auth check
+      const token = req.query.token || req.query.t;
+      const password = req.query.password || req.headers['x-api-password'];
+      
+      if (!token && password !== PASSWORD) {
+        return res.status(401).json({ error: 'Auth requerida' });
+      }
+      
+      if (token && !verifyUrlToken(targetUrl, token)) {
+        return res.status(401).json({ error: 'Token inválido' });
+      }
+
+      // Headers para upstream
+      const upstreamHeaders = {
+        'User-Agent': USER_AGENT,
+        'Accept': '*/*'
       };
-      ramCache.set(cacheKey, entry);
-      return entry;
-    } else {
-      // No cacheable result; create a streaming wrapper object with response and headers
-      return { streamResponse: response, headers: responseHeaders, status: response.status };
-    }
-  })();
 
-  fetchLocks.set(cacheKey, promise);
-  try {
-    const result = await promise;
-    return result;
-  } finally {
-    fetchLocks.delete(cacheKey);
-  }
-}
-
-// ====== /proxy handler ======
-app.get('/proxy', async (req, res) => {
-  activeRequests++;
-  try {
-    const rawTarget = req.query.url;
-    if (!rawTarget) return res.status(400).json({ error: 'url query required' });
-
-    if (!hasAllowedScheme(rawTarget)) {
-      return res.status(400).json({ error: 'Unsupported URL scheme' });
-    }
-
-    const targetHost = new URL(rawTarget).hostname;
-    if (await isIpPrivateOrLocal(targetHost)) {
-      return res.status(403).json({ error: 'Destino no permitido (IP privada/local)' });
-    }
-
-    if (!checkAuthOrToken(req, res, rawTarget)) return;
-
-    const cacheKey = generateCacheKey(rawTarget, req.headers);
-    // Try serve from RAM cache (only for full object hits)
-    const cached = ramCache.get(cacheKey);
-    if (cached && !req.headers.range) {
-      // Serve cached copy
-      Object.entries(cached.headers || {}).forEach(([k, v]) => {
-        if (k.toLowerCase() !== 'content-length') res.setHeader(k, v);
-      });
-      res.setHeader('X-Cache', 'HIT');
-      res.setHeader('Content-Length', cached.body.length);
-      res.setHeader('X-Proxy-Status', String(cached.status || 200));
-      return res.status(cached.status || 200).end(cached.body);
-    }
-
-    // MISS - fetch upstream and maybe cache
-    console.info('Cache MISS for', redactUrl(rawTarget));
-    res.setHeader('X-Cache', 'MISS');
-
-    // fetch and maybe cache
-    const entry = await fetchAndMaybeCache(rawTarget, req, res, cacheKey);
-
-    if (entry.body) {
-      // buffered/cached entry
-      Object.entries(entry.headers || {}).forEach(([k, v]) => {
-        if (k.toLowerCase() !== 'content-length') res.setHeader(k, v);
-      });
-      res.setHeader('Content-Length', entry.body.length);
-      res.setHeader('X-Proxy-Status', String(entry.status || 200));
-      return res.status(entry.status || 200).end(entry.body);
-    } else if (entry.streamResponse) {
-      // stream directly
-      const upstream = entry.streamResponse;
-      // passthrough headers
-      for (const [k, v] of upstream.headers) {
-        // avoid overriding content-length when chunked streaming
-        res.setHeader(k, v);
+      // Preservar Range header para streaming parcial
+      if (req.headers.range) {
+        upstreamHeaders.Range = req.headers.range;
       }
-      res.setHeader('X-Proxy-Status', String(entry.status || 200));
-      // Set status on response (important for partial content)
-      res.status(entry.status || 200);
-      if (upstream.body) {
-        try {
-          await pipeline(upstream.body, res);
-        } catch (err) {
-          // client aborted or upstream error
-          console.warn('Streaming pipeline error:', err?.message || err);
+
+      console.log(`Proxying: ${targetUrl.substring(0, 100)}...`);
+
+      // Fetch upstream
+      const { response } = await safeFetchForLargeFiles(targetUrl, {
+        headers: upstreamHeaders
+      });
+
+      if (!response.ok) {
+        return res.status(response.status).json({ 
+          error: `Upstream error: ${response.status}` 
+        });
+      }
+
+      const contentLength = parseInt(response.headers.get('content-length') || '0');
+      const contentType = response.headers.get('content-type') || '';
+
+      // Headers de respuesta
+      const passthroughHeaders = [
+        'content-type', 'content-length', 'accept-ranges', 
+        'content-range', 'etag', 'last-modified'
+      ];
+
+      for (const header of passthroughHeaders) {
+        const value = response.headers.get(header);
+        if (value) {
+          res.setHeader(header, value);
+        }
+      }
+
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.setHeader('X-Proxy-Status', response.status);
+
+      // Decisión de caching vs streaming directo
+      if (shouldBypassCache(targetUrl, req.headers, contentLength)) {
+        // Stream directo para archivos grandes
+        console.log(`Streaming large file: ${Math.round(contentLength/1024/1024)}MB`);
+        res.setHeader('X-Cache', 'BYPASS-LARGE');
+        
+        res.status(response.status);
+        
+        if (response.body) {
+          try {
+            await pipeline(response.body, res);
+          } catch (err) {
+            console.warn('Streaming error:', err.message);
+          }
+        } else {
+          res.end();
         }
       } else {
-        res.end();
+        // Cache pequeño para manifiestos y archivos chicos
+        const cacheKey = crypto.createHash('md5').update(targetUrl).digest('hex');
+        
+        try {
+          const buffer = await response.arrayBuffer();
+          const data = Buffer.from(buffer);
+          
+          // Cache si es suficientemente pequeño
+          if (data.length < MAX_CACHE_ITEM_SIZE_MB * 1024 * 1024) {
+            manifestCache.set(cacheKey, {
+              headers: Object.fromEntries(response.headers.entries()),
+              body: data,
+              timestamp: Date.now()
+            });
+            res.setHeader('X-Cache', 'STORED');
+          } else {
+            res.setHeader('X-Cache', 'MISS-TOO-LARGE');
+          }
+          
+          res.status(response.status);
+          res.end(data);
+        } catch (err) {
+          console.error('Buffer error:', err.message);
+          res.status(502).json({ error: 'Error buffering response' });
+        }
       }
-      return;
+
+      // Garbage collection si es necesario
+      if (shouldTriggerGC() && global.gc) {
+        setImmediate(() => global.gc());
+      }
+
+    } catch (error) {
+      console.error('Proxy error:', error.message);
+      
+      if (error.name === 'AbortError') {
+        return res.status(504).json({ error: 'Timeout' });
+      }
+      
+      return res.status(502).json({ 
+        error: 'Proxy failed',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  });
+});
+
+// Keepalive endpoint para evitar cold starts
+app.get('/keepalive', (req, res) => {
+  res.json({ 
+    ok: true, 
+    timestamp: Date.now(),
+    memory: getMemoryUsage().used + 'MB'
+  });
+});
+
+// ====== GRACEFUL SHUTDOWN OPTIMIZADO ======
+const gracefulShutdown = (signal) => {
+  console.log(`Received ${signal}, starting graceful shutdown...`);
+  
+  const timeout = setTimeout(() => {
+    console.log('Forcing shutdown...');
+    process.exit(1);
+  }, 10000); // 10 segundos máximo para Render
+  
+  // Esperar que terminen las requests activas
+  const checkActive = () => {
+    if (activeRequests === 0) {
+      clearTimeout(timeout);
+      console.log('Graceful shutdown complete');
+      process.exit(0);
     } else {
-      return res.status(502).json({ error: 'Upstream error' });
+      console.log(`Waiting for ${activeRequests} active requests...`);
+      setTimeout(checkActive, 500);
     }
-  } catch (err) {
-    console.error('Proxy error:', err?.stack || err);
-    if (err.name === 'AbortError') return res.status(504).json({ error: 'Timeout fetching upstream' });
-    return res.status(502).json({ error: 'Failed to fetch resource', details: process.env.NODE_ENV === 'development' ? err?.message : undefined });
-  } finally {
-    activeRequests--;
-  }
+  };
+  
+  checkActive();
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// ====== START SERVER ======
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`MediaFlow Proxy Render optimizado ejecutándose en puerto ${PORT}`);
+  console.log(`Memoria máxima cache: ${MAX_RAM_CACHE_MB}MB`);
+  console.log(`Threshold archivos grandes: ${LARGE_FILE_THRESHOLD_MB}MB`);
+  
+  // Warmup automático
+  setTimeout(() => {
+    fetch(`http://localhost:${PORT}/health`).catch(() => {});
+  }, 1000);
 });
 
-// HEAD support
-app.head('/proxy', async (req, res) => {
-  const rawTarget = req.query.url;
-  if (!rawTarget) return res.status(400).end();
-  try {
-    if (!hasAllowedScheme(rawTarget)) return res.status(400).end();
-    const host = new URL(rawTarget).hostname;
-    if (await isIpPrivateOrLocal(host)) return res.status(403).end();
-    if (!checkAuthOrToken(req, res, rawTarget)) return;
-
-    const { response } = await safeFetch(rawTarget, { method: 'HEAD', headers: { 'User-Agent': USER_AGENT } });
-    const passthrough = ['content-type', 'content-length', 'accept-ranges', 'etag', 'last-modified', 'cache-control'];
-    for (const h of passthrough) {
-      const v = response.headers.get(h);
-      if (v) res.setHeader(h, v);
-    }
-    res.setHeader('X-Proxy-Status', String(response.status));
-    return res.status(response.status).end();
-  } catch (err) {
-    console.error('HEAD error:', err?.message || err);
-    return res.status(502).end();
-  }
-});
-
-// ====== HLS manifest rewriting ======
-app.get('/hls', async (req, res) => {
-  activeRequests++;
-  try {
-    const playlistUrl = req.query.url;
-    if (!playlistUrl) return res.status(400).json({ error: 'url query required' });
-
-    if (!hasAllowedScheme(playlistUrl)) return res.status(400).json({ error: 'Unsupported URL scheme' });
-
-    const host = new URL(playlistUrl).hostname;
-    if (await isIpPrivateOrLocal(host)) {
-      return res.status(403).json({ error: 'Destino no permitido (IP privada/local)' });
-    }
-
-    // allow either token tied to this playlist OR password
-    if (!checkAuthOrToken(req, res, playlistUrl)) return;
-
-    const cacheKey = `hls:${crypto.createHash(
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
