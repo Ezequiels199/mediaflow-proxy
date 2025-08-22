@@ -1,54 +1,59 @@
 # extractors/filemoon.py
-import re
-import requests
 from .base import BaseExtractor, ExtractorError
+import requests
 
 class FilemoonExtractor(BaseExtractor):
     name = "filemoon"
 
+    def __init__(self, timeout: int = 10):
+        self.timeout = timeout
+
     def extract(self, url: str) -> dict:
+        """
+        Stub seguro: verifica que la URL responda y devuelve metadata básica.
+        No intenta evadir protecciones. Ideal para probar que el extractor
+        está registrado y devuelve algo legible.
+        """
         try:
+            if "filemoon" not in url.lower():
+                raise ExtractorError("La URL no parece pertenecer a filemoon")
+
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 "Referer": "https://filemoon.sx/"
             }
 
-            r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code != 200:
-                raise ExtractorError(f"Filemoon devolvió {r.status_code}")
+            # Primero HEAD (rápido), fallback a GET si HEAD falla
+            try:
+                r = requests.head(url, allow_redirects=True, timeout=self.timeout, headers=headers)
+            except Exception:
+                r = requests.get(url, stream=True, allow_redirects=True, timeout=self.timeout, headers=headers)
 
-            # Buscar posibles patrones
-            video_url = None
-            patterns = [
-                r'file:\s*"([^"]+)"',
-                r'sources\s*:\s*\[\{file:\s*"([^"]+)"',
-                r'src\s*=\s*"([^"]+\.m3u8)"'
-            ]
-            for pat in patterns:
-                m = re.search(pat, r.text)
-                if m:
-                    video_url = m.group(1)
-                    break
+            status = getattr(r, "status_code", None)
+            final_url = getattr(r, "url", url)
+            ct = r.headers.get("Content-Type", "") if hasattr(r, "headers") else ""
+            cl = r.headers.get("Content-Length") if hasattr(r, "headers") else None
 
-            if not video_url:
-                raise ExtractorError("No se pudo extraer el enlace directo de Filemoon")
-
-            # Determinar content-type
-            if ".m3u8" in video_url:
-                ctype = "application/x-mpegURL"
-                fmt = "hls"
-            else:
-                ctype = "video/mp4"
-                fmt = "mp4"
-
-            return {
-                "destination_url": video_url,
-                "content_type": ctype,
-                "format": fmt,
-                "note": "extraído desde Filemoon"
+            info = {
+                "destination_url": final_url,
+                "http_status": status,
+                "content_type": ct,
+                "size": int(cl) if cl and cl.isdigit() else None,
+                "note": "Stub: resolución final del embed NO implementada por seguridad. Si el HEAD detecta video, se devuelve directo."
             }
 
-        except Exception as e:
-            raise ExtractorError(f"Error en Filemoon extractor: {str(e)}")
+            # Si el recurso es video detectado por HEAD devolvemos info directa
+            if status == 200 and ct.startswith("video/"):
+                info["note"] = "Directo detectado en HEAD"
+                return info
 
+            # No se encontró recurso directo: devolvemos error claro
+            raise ExtractorError("No se detectó recurso de video directo. Implementar parser del embed si tienes derecho legal a hacerlo.")
+
+        except ExtractorError:
+            raise
+        except Exception as e:
+            raise ExtractorError(f"Error en Filemoon extractor: {e}")
+
+# exportar instancia (loader lo detecta)
 extractor = FilemoonExtractor()
